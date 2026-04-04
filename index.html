@@ -19,6 +19,7 @@ body{
 }
 @keyframes fadeOut{from{opacity:1}to{opacity:0}}
 @keyframes breathe{0%,100%{opacity:.6}50%{opacity:1}}
+@keyframes spin{to{transform:rotate(360deg)}}
 .flash-overlay{position:fixed;inset:0;pointer-events:none;z-index:100;background:#fff}
 
 #speaker-box{
@@ -65,8 +66,15 @@ body{
 #energy-bar{height:100%;width:0%;transition:width .08s linear,background .3s;background:#333}
 
 #version-tag{position:absolute;top:16px;right:16px;font-size:11px;color:#333;letter-spacing:1px}
+#model-badge{position:absolute;top:36px;right:16px;font-size:8px;color:#333;letter-spacing:1px}
 #listening-dot{width:14px;height:14px;border-radius:50%;background:#333;position:absolute;top:18px;left:18px;transition:background .3s}
-#gpu-badge{position:absolute;top:36px;left:18px;font-size:8px;color:#333;letter-spacing:1px}
+
+#load-progress{
+  position:absolute;bottom:20px;left:20px;right:20px;
+  font-size:11px;color:#444;text-align:center;letter-spacing:1px;
+}
+#load-bar{height:2px;background:#111;border-radius:1px;margin-top:6px;overflow:hidden}
+#load-bar-fill{height:100%;width:0%;background:#4ECDC4;transition:width .3s}
 </style>
 </head>
 <body>
@@ -75,40 +83,41 @@ body{
 
 <div id="speaker-box">
   <div id="listening-dot"></div>
-  <div id="gpu-badge">GPU</div>
   <div id="version-tag">v3.0</div>
+  <div id="model-badge">PYANNOTE</div>
   <div id="speaker-letter">?</div>
-  <div id="speaker-name">LOADING TF.js...</div>
-  <div id="status-text">INITIALIZING GPU ENGINE</div>
+  <div id="speaker-name">LOADING AI MODEL...</div>
+  <div id="status-text">DOWNLOADING PYANNOTE (5MB)</div>
   <div id="debug-info" style="font-size:min(3vw,13px);margin-top:16px;opacity:.25;letter-spacing:1px"></div>
+  <div id="load-progress">
+    <span id="load-text">Initializing...</span>
+    <div id="load-bar"><div id="load-bar-fill"></div></div>
+  </div>
 </div>
 
 <div id="chips-bar"></div>
 
 <div id="controls">
-  <button id="btn-start" onclick="toggle()" disabled>START</button>
+  <button id="btn-start" onclick="toggle()" disabled>LOADING...</button>
   <button id="btn-reset" onclick="resetAll()">RESET</button>
 </div>
 
-<!-- TensorFlow.js — GPU-accelerated tensor operations -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script type="module">
+import { AutoProcessor, AutoModelForAudioFrameClassification } from
+  'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
 
-<script>
 const COLORS=["#FF6B35","#4ECDC4","#FFE66D","#A78BFA","#F38181","#34D399","#FCBAD3","#60A5FA"];
-const FFT_SIZE=2048;
-const NUM_MEL=40;       // 40 mel bands (was 24)
-const NUM_MFCC=20;      // 20 MFCCs from DCT
-const INTERVAL=80;      // 80ms — accuracy over speed
-const WIN=10;           // 10 frames = 800ms analysis window
-const PROF_FRAMES=15;   // 15 voice frames before freezing profile
+const TARGET_SR=16000; // pyannote expects 16kHz
+const CHUNK_SEC=10;    // 10-second analysis window
+const CHUNK_SAMPLES=TARGET_SR*CHUNK_SEC; // 160000
+const PROCESS_INTERVAL=2500; // Run model every 2.5 seconds (accuracy > speed)
 
-let running=false,audioCtx,analyser,stream,timer,beepCtx;
-let melFilterbank=null; // TF.js tensor — GPU mel filterbank matrix
-let dctMatrix=null;     // TF.js tensor — GPU DCT matrix
-let profiles=[],frameBuffer=[],curSpeaker=null,changeN=0;
-let noiseFloor=-100,calibrating=true,calibFrames=[];
+let running=false,audioCtx,stream,scriptNode,beepCtx;
+let audioRingBuffer=new Float32Array(0);
+let deviceSR=48000;
+let model=null,processor=null;
+let curSpeaker=null,processTimer=null;
 let wakeLock=null,notifyPermission='default';
-let tfReady=false;
 
 // DOM
 const $=id=>document.getElementById(id);
@@ -116,106 +125,173 @@ const el={
   letter:$('speaker-letter'),name:$('speaker-name'),status:$('status-text'),
   dot:$('listening-dot'),eBar:$('energy-bar'),box:$('speaker-box'),
   chips:$('chips-bar'),btnS:$('btn-start'),debug:$('debug-info'),
-  gpu:$('gpu-badge')
+  loadText:$('load-text'),loadBar:$('load-bar-fill'),loadProgress:$('load-progress')
 };
 
 // ==============================
-// TF.js GPU Engine
+// Load pyannote model
 // ==============================
+async function loadModel(){
+  try{
+    el.loadText.textContent='Loading processor...';
+    el.loadBar.style.width='20%';
 
-// Build mel filterbank as a GPU tensor (NUM_FFT_BINS x NUM_MEL)
-function buildMelFilterbankTensor(fftSize,sampleRate,numMel){
-  const nBins=fftSize/2;
-  const fMin=80,fMax=Math.min(7600,sampleRate/2);
-  const melMin=2595*Math.log10(1+fMin/700);
-  const melMax=2595*Math.log10(1+fMax/700);
-  const melPts=[];
-  for(let i=0;i<numMel+2;i++) melPts.push(700*(Math.pow(10,(melMin+(melMax-melMin)*i/(numMel+1))/2595)-1));
-  const binPts=melPts.map(f=>Math.round(f*fftSize/sampleRate));
+    const modelId='onnx-community/pyannote-segmentation-3.0';
 
-  const fb=new Float32Array(nBins*numMel);
-  for(let m=0;m<numMel;m++){
-    for(let k=binPts[m];k<binPts[m+1]&&k<nBins;k++){
-      fb[k*numMel+m]=(k-binPts[m])/(binPts[m+1]-binPts[m]+1e-10);
-    }
-    for(let k=binPts[m+1];k<binPts[m+2]&&k<nBins;k++){
-      fb[k*numMel+m]=(binPts[m+2]-k)/(binPts[m+2]-binPts[m+1]+1e-10);
-    }
+    processor=await AutoProcessor.from_pretrained(modelId);
+    el.loadText.textContent='Loading AI model (5MB)...';
+    el.loadBar.style.width='50%';
+
+    model=await AutoModelForAudioFrameClassification.from_pretrained(modelId,{
+      dtype:'fp32'
+    });
+    el.loadBar.style.width='100%';
+    el.loadText.textContent='Model ready!';
+
+    setTimeout(()=>{
+      el.loadProgress.style.display='none';
+      el.name.textContent='TAP START';
+      el.status.textContent='PYANNOTE AI · 7000+ SPEAKERS TRAINED';
+      el.btnS.textContent='START';
+      el.btnS.disabled=false;
+    },500);
+  }catch(e){
+    el.loadText.textContent='Failed to load model: '+e.message;
+    el.status.textContent='ERROR';
+    console.error('Model load error:',e);
   }
-  return tf.tensor2d(fb,[nBins,numMel]);
 }
+loadModel();
 
-// Build DCT-II matrix as a GPU tensor (NUM_MEL x NUM_MFCC)
-function buildDCTMatrix(numMel,numMfcc){
-  const dct=new Float32Array(numMel*numMfcc);
-  for(let k=0;k<numMfcc;k++){
-    for(let n=0;n<numMel;n++){
-      dct[n*numMfcc+k]=Math.cos(Math.PI*k*(2*n+1)/(2*numMel));
-    }
+// ==============================
+// Audio resampling (device SR → 16kHz)
+// ==============================
+function resampleTo16k(inputData,fromRate){
+  if(fromRate===TARGET_SR) return inputData;
+  const ratio=fromRate/TARGET_SR;
+  const newLen=Math.floor(inputData.length/ratio);
+  const output=new Float32Array(newLen);
+  for(let i=0;i<newLen;i++){
+    const srcIdx=i*ratio;
+    const lo=Math.floor(srcIdx);
+    const hi=Math.min(lo+1,inputData.length-1);
+    const frac=srcIdx-lo;
+    output[i]=inputData[lo]*(1-frac)+inputData[hi]*frac;
   }
-  return tf.tensor2d(dct,[numMel,numMfcc]);
+  return output;
 }
 
-// Extract rich speaker embedding from FFT data — ALL on GPU
-// Input: Float32Array of FFT magnitudes (dB)
-// Output: Float32Array of ~120-dim speaker embedding
-function extractEmbedding(fftData){
-  return tf.tidy(()=>{
-    // 1. Convert dB FFT to linear magnitude on GPU
-    const fftTensor=tf.tensor1d(fftData);
-    const linearMag=tf.pow(10,tf.div(fftTensor,20));
+// ==============================
+// Process audio with pyannote
+// ==============================
+async function processAudio(){
+  if(!running||!model||audioRingBuffer.length<deviceSR*3) return;
 
-    // 2. Apply mel filterbank (matrix multiply on GPU)
-    const melEnergies=tf.matMul(linearMag.reshape([1,-1]),melFilterbank);
+  try{
+    // Get last 10 seconds of audio (or whatever we have)
+    const samplesToTake=Math.min(audioRingBuffer.length,deviceSR*CHUNK_SEC);
+    const rawChunk=audioRingBuffer.slice(-samplesToTake);
 
-    // 3. Log compression
-    const logMel=tf.log(tf.add(melEnergies,1e-10));
+    // Resample to 16kHz
+    const audio16k=resampleTo16k(rawChunk,deviceSR);
 
-    // 4. DCT to get MFCCs (matrix multiply on GPU)
-    const mfcc=tf.matMul(logMel,dctMatrix); // [1, NUM_MFCC]
+    // Pad to exactly 10 seconds if needed
+    let inputAudio;
+    if(audio16k.length>=CHUNK_SAMPLES){
+      inputAudio=audio16k.slice(-CHUNK_SAMPLES);
+    }else{
+      inputAudio=new Float32Array(CHUNK_SAMPLES);
+      inputAudio.set(audio16k,CHUNK_SAMPLES-audio16k.length);
+    }
 
-    // 5. Also keep mel energies for extra discrimination
-    // Return concatenated: MFCCs + log mel energies = 20 + 40 = 60 dims per frame
-    const combined=tf.concat([mfcc,logMel],1);
-    return combined.dataSync(); // back to CPU as Float32Array
-  });
-}
+    // Run pyannote model
+    const inputs=await processor(inputAudio);
+    const output=await model(inputs);
+    const logits=output.logits.data; // Float32Array
+    const numFrames=output.logits.dims[1]; // ~767
+    const numClasses=output.logits.dims[2]; // 3 speaker channels (or 7)
 
-// Compute speaker embedding from multiple frames — statistics on GPU
-// Takes array of per-frame features, returns aggregated embedding
-function computeSpeakerEmbedding(frames){
-  return tf.tidy(()=>{
-    const frameTensor=tf.tensor2d(frames); // [numFrames, 60]
+    // Analyze the LAST 2 seconds of output (most recent speech)
+    const framesPerSec=numFrames/CHUNK_SEC;
+    const analyzeFrames=Math.floor(framesPerSec*2);
+    const startFrame=numFrames-analyzeFrames;
 
-    // Mean across time
-    const mean=frameTensor.mean(0); // [60]
+    // Count active frames per speaker in the last 2 seconds
+    const speakerActivity=new Array(numClasses).fill(0);
+    let totalActiveFrames=0;
 
-    // Standard deviation across time (captures voice stability)
-    const variance=frameTensor.sub(mean).square().mean(0);
-    const std=variance.sqrt(); // [60]
+    for(let f=startFrame;f<numFrames;f++){
+      for(let s=0;s<numClasses;s++){
+        const val=logits[f*numClasses+s];
+        // Sigmoid to get probability
+        const prob=1/(1+Math.exp(-val));
+        if(prob>0.5){
+          speakerActivity[s]++;
+          totalActiveFrames++;
+        }
+      }
+    }
 
-    // Concatenate: mean + std = 120-dimensional embedding
-    const embedding=tf.concat([mean,std]);
-    return embedding.dataSync();
-  });
-}
+    // Find dominant speaker
+    let dominantSpeaker=-1;
+    let maxActivity=0;
+    const activityText=[];
+    for(let s=0;s<Math.min(numClasses,3);s++){
+      activityText.push(String.fromCharCode(65+s)+':'+speakerActivity[s]);
+      if(speakerActivity[s]>maxActivity){
+        maxActivity=speakerActivity[s];
+        dominantSpeaker=s;
+      }
+    }
 
-// Cosine similarity on GPU
-function cosSimilarity(a,b){
-  return tf.tidy(()=>{
-    const ta=tf.tensor1d(a);
-    const tb=tf.tensor1d(b);
-    const dot=ta.mul(tb).sum();
-    const normA=ta.norm();
-    const normB=tb.norm();
-    return dot.div(normA.mul(normB).add(1e-10)).dataSync()[0];
-  });
+    el.debug.textContent='frames:'+numFrames+' ch:'+numClasses+' '+activityText.join(' ')+' active:'+totalActiveFrames;
+
+    if(totalActiveFrames<5){
+      // Nobody speaking in the last 2 seconds
+      el.status.textContent='ACTIVE — NO SPEECH DETECTED';
+      return;
+    }
+
+    el.status.textContent='ANALYZING...';
+
+    // Check if speaker changed
+    if(dominantSpeaker>=0 && dominantSpeaker!==curSpeaker){
+      const prevSpeaker=curSpeaker;
+      curSpeaker=dominantSpeaker;
+      setSpeakerUI(curSpeaker);
+
+      // Count total unique speakers seen
+      const uniqueSpeakers=new Set();
+      for(let s=0;s<Math.min(numClasses,3);s++){
+        if(speakerActivity[s]>2)uniqueSpeakers.add(s);
+      }
+      // Include previously seen speakers
+      if(prevSpeaker!==null)uniqueSpeakers.add(prevSpeaker);
+      uniqueSpeakers.add(curSpeaker);
+
+      updateChips(Math.max(uniqueSpeakers.size,curSpeaker+1),curSpeaker);
+
+      if(prevSpeaker!==null){
+        // Speaker CHANGED — notify!
+        beep(curSpeaker);
+        doubleFlash();
+        notifySpeakerChange(String.fromCharCode(65+curSpeaker));
+      }
+
+      el.status.textContent='SPEAKER '+String.fromCharCode(65+curSpeaker);
+    }else if(dominantSpeaker>=0){
+      el.status.textContent='SPEAKER '+String.fromCharCode(65+curSpeaker);
+    }
+
+  }catch(e){
+    el.debug.textContent='Process error: '+e.message;
+    console.error('Process error:',e);
+  }
 }
 
 // ==============================
 // Notifications & UI
 // ==============================
-
 async function requestNotifyPermission(){
   if(!('Notification' in window))return;
   try{notifyPermission=await Notification.requestPermission()}catch(_){
@@ -235,9 +311,7 @@ function notifySpeakerChange(letter){
   try{if(navigator.vibrate)navigator.vibrate([100,80,100])}catch(_){}
 }
 
-function doubleFlash(){
-  doOneFlash();setTimeout(doOneFlash,250);
-}
+function doubleFlash(){doOneFlash();setTimeout(doOneFlash,250)}
 function doOneFlash(){
   const f=document.createElement('div');
   f.className='flash-overlay';document.body.appendChild(f);
@@ -280,192 +354,80 @@ function updateChips(total,active){
   }
 }
 
-function onSpeakerChange(idx){
-  const letter=String.fromCharCode(65+idx);
-  setSpeakerUI(idx);updateChips(profiles.length,idx);
-  beep(idx);doubleFlash();notifySpeakerChange(letter);
-}
-
 async function requestWake(){try{if('wakeLock' in navigator){wakeLock=await navigator.wakeLock.request('screen')}}catch(_){}}
 function releaseWake(){if(wakeLock){wakeLock.release();wakeLock=null}}
 
 // ==============================
-// Init TF.js
-// ==============================
-async function initTF(){
-  await tf.ready();
-  const backend=tf.getBackend();
-  el.gpu.textContent=backend.toUpperCase();
-  el.gpu.style.color=backend==='webgl'?'#00ff88':'#ffaa00';
-  el.name.textContent='TAP START';
-  el.status.textContent=backend.toUpperCase()+' READY · 120-DIM EMBEDDINGS';
-  el.btnS.disabled=false;
-  tfReady=true;
-}
-initTF();
-
-// ==============================
-// Main Engine
+// Mic capture (raw PCM)
 // ==============================
 async function startMic(){
-  if(!tfReady)return;
+  if(!model)return;
   try{
     await requestNotifyPermission();
 
     try{
-      stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+      stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,sampleRate:16000}});
     }catch(_){
       stream=await navigator.mediaDevices.getUserMedia({audio:true});
     }
+
     audioCtx=new(window.AudioContext||window.webkitAudioContext)();
     if(audioCtx.state==='suspended')await audioCtx.resume();
+    deviceSR=audioCtx.sampleRate;
 
-    const src=audioCtx.createMediaStreamSource(stream);
-    analyser=audioCtx.createAnalyser();
-    analyser.fftSize=FFT_SIZE;analyser.smoothingTimeConstant=.1;
-    src.connect(analyser);
+    const source=audioCtx.createMediaStreamSource(stream);
+    // Use ScriptProcessorNode to capture raw PCM samples
+    scriptNode=audioCtx.createScriptProcessor(4096,1,1);
+    source.connect(scriptNode);
+    scriptNode.connect(audioCtx.destination);
 
-    // Build GPU tensors for this sample rate
-    if(melFilterbank)melFilterbank.dispose();
-    if(dctMatrix)dctMatrix.dispose();
-    melFilterbank=buildMelFilterbankTensor(FFT_SIZE,audioCtx.sampleRate,NUM_MEL);
-    dctMatrix=buildDCTMatrix(NUM_MEL,NUM_MFCC);
+    // Ring buffer for last 10 seconds at device sample rate
+    const maxSamples=deviceSR*CHUNK_SEC;
+    audioRingBuffer=new Float32Array(0);
 
-    profiles=[];frameBuffer=[];curSpeaker=null;changeN=0;
-    calibrating=true;calibFrames=[];noiseFloor=-100;
-    el.chips.innerHTML='';
+    scriptNode.onaudioprocess=function(e){
+      const input=e.inputBuffer.getChannelData(0);
 
-    running=true;requestWake();
-    el.btnS.textContent='STOP';el.btnS.classList.add('running');
-    el.letter.textContent='...';el.letter.style.color='#333';
-    el.name.textContent='CALIBRATING';el.name.style.color='#ffaa00';
-    el.status.textContent='STAY QUIET — MEASURING NOISE...';
-    el.dot.style.background='#ffaa00';el.box.style.background='#000';
+      // Append to ring buffer
+      const newBuf=new Float32Array(audioRingBuffer.length+input.length);
+      newBuf.set(audioRingBuffer);
+      newBuf.set(input,audioRingBuffer.length);
 
-    const fft=new Float32Array(analyser.frequencyBinCount);
-
-    timer=setInterval(()=>{
-      analyser.getFloatFrequencyData(fft);
-
-      // Compute energy
-      let tot=0,n=0;
-      for(let i=0;i<fft.length;i++){if(fft[i]>-100){tot+=10**(fft[i]/10);n++}}
-      const avg=n>0?10*Math.log10(tot/n):-100;
-      const pct=Math.max(0,Math.min(100,(avg+80)*2));
-      el.eBar.style.width=pct+'%';
-
-      // === PHASE 1: Calibrate noise floor ===
-      if(calibrating){
-        calibFrames.push(avg);
-        el.debug.textContent='Calibrating... '+calibFrames.length+'/20 dB:'+avg.toFixed(0);
-        if(calibFrames.length>=20){
-          const sum=calibFrames.reduce((a,b)=>a+b,0);
-          noiseFloor=sum/calibFrames.length+10; // +10dB margin for voices
-          calibrating=false;
-          el.name.textContent='LISTENING';el.name.style.color='#444';
-          el.status.textContent='SPEAK NOW';
-        }
-        return;
-      }
-
-      // === PHASE 2: Voice gate ===
-      const isVoice=avg>noiseFloor;
-
-      if(!isVoice){
-        if(frameBuffer.length>0)frameBuffer=[];
-        changeN=0;
-        el.dot.style.background='#00ff88';el.dot.style.animation='none';
-        el.status.textContent=curSpeaker!==null?'ACTIVE — WAITING':'ACTIVE — SPEAK NOW';
-        el.debug.textContent='dB:'+avg.toFixed(0)+' floor:'+noiseFloor.toFixed(0)+' (no voice)';
-        return;
-      }
-
-      // Voice detected — extract features on GPU
-      el.dot.style.animation='breathe 1s infinite';
-      el.status.textContent='ANALYZING VOICE...';
-
-      const frameFeatures=extractEmbedding(fft); // 60-dim per frame, computed on GPU
-      frameBuffer.push(Array.from(frameFeatures));
-      if(frameBuffer.length>WIN)frameBuffer.shift();
-
-      // Need enough voice frames for reliable embedding
-      if(frameBuffer.length<5){
-        el.debug.textContent='dB:'+avg.toFixed(0)+' collecting voice... '+frameBuffer.length+'/5';
-        return;
-      }
-
-      // Compute 120-dim speaker embedding from frame buffer (stats on GPU)
-      const embedding=computeSpeakerEmbedding(frameBuffer);
-
-      // Compare against all profiles
-      let bestI=-1,bestS=-1;
-      let simText='';
-      for(let i=0;i<profiles.length;i++){
-        const s=cosSimilarity(embedding,profiles[i].embedding);
-        simText+=String.fromCharCode(65+i)+':'+s.toFixed(3)+' ';
-        if(s>bestS){bestS=s;bestI=i}
-      }
-
-      // Threshold — lower = more sensitive to voice differences
-      const threshold=0.82;
-      el.debug.textContent='dB:'+avg.toFixed(0)+' thr:'+threshold+' dim:120 '+simText;
-      el.status.textContent='VOICE DETECTED';
-
-      // First speaker
-      if(profiles.length===0){
-        profiles.push({
-          embedding:Array.from(embedding),
-          frames:[...frameBuffer],
-          frozen:false,
-          frameCount:frameBuffer.length
-        });
-        curSpeaker=0;onSpeakerChange(0);
-        return;
-      }
-
-      if(bestS>=threshold){
-        // Matches existing speaker
-        if(bestI!==curSpeaker){
-          curSpeaker=bestI;onSpeakerChange(bestI);
-          frameBuffer=[];
-        }else{
-          // Same speaker — build up profile then freeze
-          const p=profiles[bestI];
-          if(!p.frozen){
-            p.frames.push(Array.from(frameFeatures));
-            p.frameCount++;
-            if(p.frameCount>=PROF_FRAMES){
-              // Re-compute final frozen embedding from all collected frames
-              p.embedding=Array.from(computeSpeakerEmbedding(p.frames.slice(-PROF_FRAMES)));
-              p.frozen=true;
-              el.debug.textContent+=' [FROZEN '+String.fromCharCode(65+bestI)+']';
-            }
-          }
-        }
-        changeN=0;
+      // Keep only last 10 seconds
+      if(newBuf.length>maxSamples){
+        audioRingBuffer=newBuf.slice(-maxSamples);
       }else{
-        // Doesn't match — new speaker
-        changeN++;
-        if(changeN>=2){
-          const ni=profiles.length;
-          profiles.push({
-            embedding:Array.from(embedding),
-            frames:[...frameBuffer],
-            frozen:false,
-            frameCount:frameBuffer.length
-          });
-          curSpeaker=ni;onSpeakerChange(ni);
-          changeN=0;frameBuffer=[];
-        }
+        audioRingBuffer=newBuf;
       }
-    },INTERVAL);
+
+      // Update energy bar
+      let sum=0;
+      for(let i=0;i<input.length;i++)sum+=input[i]*input[i];
+      const rms=Math.sqrt(sum/input.length);
+      const db=20*Math.log10(Math.max(rms,1e-10));
+      const pct=Math.max(0,Math.min(100,(db+60)*2.5));
+      el.eBar.style.width=pct+'%';
+    };
+
+    running=true;
+    requestWake();
+    curSpeaker=null;
+    el.chips.innerHTML='';
+    el.btnS.textContent='STOP';el.btnS.classList.add('running');
+    el.letter.textContent='...';el.letter.style.color='#444';
+    el.name.textContent='LISTENING';el.name.style.color='#444';
+    el.status.textContent='RECORDING — FIRST ANALYSIS IN 3s';
+    el.dot.style.background='#00ff88';el.dot.style.animation='breathe 1s infinite';
+    el.box.style.background='#000';
+    el.debug.textContent='SR:'+deviceSR+' buffer:0/'+maxSamples;
+
+    // Run pyannote model every PROCESS_INTERVAL ms
+    processTimer=setInterval(processAudio,PROCESS_INTERVAL);
 
   }catch(e){
     if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError'){
       el.status.textContent='MIC DENIED';
       el.name.textContent='ALLOW MIC & RELOAD';el.name.style.color='#ff4444';
-    }else if(e.name==='NotFoundError'){
-      el.status.textContent='NO MIC FOUND';
     }else{
       el.status.textContent='ERROR: '+e.message;
     }
@@ -473,24 +435,26 @@ async function startMic(){
 }
 
 function stopMic(){
-  if(timer)clearInterval(timer);
+  if(processTimer)clearInterval(processTimer);
+  if(scriptNode){scriptNode.disconnect();scriptNode=null}
   if(stream)stream.getTracks().forEach(t=>t.stop());
   if(audioCtx)audioCtx.close();
   running=false;releaseWake();
+  audioRingBuffer=new Float32Array(0);
   el.btnS.textContent='START';el.btnS.classList.remove('running');
   el.dot.style.background='#333';el.dot.style.animation='none';
   el.status.textContent='STOPPED';
 }
 
-function toggle(){running?stopMic():startMic()}
+window.toggle=function(){running?stopMic():startMic()};
 
-function resetAll(){
-  profiles=[];frameBuffer=[];curSpeaker=null;changeN=0;
+window.resetAll=function(){
+  curSpeaker=null;
   el.letter.textContent='?';el.letter.style.color='#333';
   el.name.textContent='TAP START';el.name.style.color='#444';
   el.status.textContent='READY';el.box.style.background='#000';
   el.chips.innerHTML='';el.eBar.style.width='0%';el.eBar.style.background='#333';
-}
+};
 </script>
 </body>
 </html>
