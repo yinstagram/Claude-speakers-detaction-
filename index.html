@@ -87,6 +87,7 @@ body{
   <div id="speaker-letter">?</div>
   <div id="speaker-name">TAP START</div>
   <div id="status-text">READY</div>
+  <div id="debug-info" style="font-size:min(3vw,13px);margin-top:16px;opacity:.25;letter-spacing:1px"></div>
 </div>
 
 <!-- Speaker chips -->
@@ -100,13 +101,13 @@ body{
 
 <script>
 const COLORS=["#FF6B35","#4ECDC4","#FFE66D","#A78BFA","#F38181","#34D399","#FCBAD3","#60A5FA"];
-const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=60,WIN=8;
-// Faster detection: fewer confirmations needed
-const CONFIRM_CHG=2,CONFIRM_NEW=3,PROF_MAX=40;
+const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=50,WIN=6;
+// Ultra-fast detection: minimal confirmations
+const CONFIRM_CHG=1,CONFIRM_NEW=2,PROF_MAX=30;
 
 let running=false,audioCtx,analyser,stream,timer;
 let filterbank,profiles=[],win=[],curSpeaker=null,silenceN=0,changeN=0,beepCtx;
-let sensitivity=0.58,mobileOffset=0;
+let sensitivity=0.52,mobileOffset=0;
 let wakeLock=null;
 
 // DOM refs
@@ -118,6 +119,7 @@ const elEnergyBar=document.getElementById('energy-bar');
 const elSpeakerBox=document.getElementById('speaker-box');
 const elChips=document.getElementById('chips-bar');
 const elBtnStart=document.getElementById('btn-start');
+const elDebug=document.getElementById('debug-info');
 
 // === Audio math ===
 const hz2mel=f=>2595*Math.log10(1+f/700);
@@ -159,6 +161,8 @@ function cosSim(a,b){
 function doubleFlash(){
   doOneFlash();
   setTimeout(doOneFlash,250);
+  // Vibrate on mobile (Android; iOS ignores this but we try)
+  try{if(navigator.vibrate)navigator.vibrate([100,80,100])}catch(_){}
 }
 function doOneFlash(){
   const f=document.createElement('div');
@@ -241,7 +245,7 @@ async function startMic(){
     const trk=stream.getAudioTracks()[0];
     const settings=trk.getSettings?trk.getSettings():{};
     if(settings.echoCancellation||settings.noiseSuppression||settings.autoGainControl){
-      mobileOffset=0.08;
+      mobileOffset=0.10;
     }else{
       mobileOffset=0;
     }
@@ -270,10 +274,11 @@ async function startMic(){
       for(let i=0;i<fft.length;i++){if(fft[i]>-100){tot+=10**(fft[i]/10);n++}}
       const avg=n>0?10*Math.log10(tot/n):-100;
       const pct=Math.max(0,Math.min(100,(avg+75)*1.8));
-      const thr=-45+(1-sensitivity)*15;
+      const thr=-60+(1-sensitivity)*12;
       const isSpeaking=avg>=thr;
 
       elEnergyBar.style.width=pct+'%';
+      elDebug.textContent='dB:'+avg.toFixed(0)+' thr:'+thr.toFixed(0)+' spk:'+(isSpeaking?'YES':'no')+' win:'+win.length+' profiles:'+profiles.length;
 
       if(!isSpeaking){
         silenceN++;
@@ -293,7 +298,7 @@ async function startMic(){
       const feat=extract(fft,filterbank,sr);
       win.push(feat);
       if(win.length>WIN)win.shift();
-      if(win.length<3){elStatus.textContent='ANALYZING...';return}
+      if(win.length<2){elStatus.textContent='ANALYZING...';return}
 
       const curMean=vecMean(win);
 
