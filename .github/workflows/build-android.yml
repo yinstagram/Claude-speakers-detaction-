@@ -38,10 +38,38 @@ jobs:
 
     - name: Build Debug APK
       working-directory: ./android
-      run: gradle assembleDebug --no-daemon --stacktrace
+      run: gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build-output.log || true
+
+    - name: Show build errors
+      if: always()
+      working-directory: ./android
+      run: |
+        echo "=== LAST 100 LINES OF BUILD OUTPUT ==="
+        tail -100 build-output.log || true
+        echo "=== SEARCHING FOR ERRORS ==="
+        grep -i -A 5 "error\|FAILURE\|failed\|exception" build-output.log | tail -60 || true
+
+    - name: Check APK exists
+      working-directory: ./android
+      run: |
+        if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+          echo "APK built successfully!"
+          ls -la app/build/outputs/apk/debug/app-debug.apk
+        else
+          echo "APK NOT FOUND - build failed"
+          exit 1
+        fi
 
     - name: Upload APK
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: speaker-detect-v3.0
         path: android/app/build/outputs/apk/debug/app-debug.apk
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: android/build-output.log
