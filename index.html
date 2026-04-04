@@ -100,13 +100,14 @@ body{
 
 <script>
 const COLORS=["#FF6B35","#4ECDC4","#FFE66D","#A78BFA","#F38181","#34D399","#FCBAD3","#60A5FA"];
-const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=50,WIN=6;
-const PROF_MAX=10; // Small frozen snapshots
+const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=50,WIN=8;
+const PROF_FRAMES=12; // Frames to collect before freezing a profile
 
 let running=false,audioCtx,analyser,stream,timer;
 let filterbank,profiles=[],win=[],curSpeaker=null,changeN=0,beepCtx;
-// Very low base threshold — easier to split voices
 let sensitivity=0.42,mobileOffset=0;
+let noiseFloor=-100; // Auto-calibrated in first second
+let calibrating=true,calibFrames=[];
 let wakeLock=null;
 let notifyPermission='default';
 
@@ -290,6 +291,7 @@ async function startMic(){
     }
 
     profiles=[];win=[];curSpeaker=null;changeN=0;
+    calibrating=true;calibFrames=[];noiseFloor=-100;
     elChips.innerHTML='';
 
     running=true;
@@ -298,9 +300,9 @@ async function startMic(){
     elBtnStart.classList.add('running');
     elLetter.textContent='...';
     elLetter.style.color='#333';
-    elName.textContent='LISTENING';
-    elName.style.color='#444';
-    elStatus.textContent='SPEAK NOW';
+    elName.textContent='CALIBRATING';
+    elName.style.color='#ffaa00';
+    elStatus.textContent='MEASURING BACKGROUND NOISE...';
     elDot.style.background='#ffaa00';
     elSpeakerBox.style.background='#000';
 
@@ -315,15 +317,52 @@ async function startMic(){
       const pct=Math.max(0,Math.min(100,(avg+80)*2));
 
       elEnergyBar.style.width=pct+'%';
-      elStatus.textContent='ACTIVE';
-      elDot.style.background='#00ff88';
+
+      // === PHASE 1: Auto-calibrate noise floor (first ~1 second) ===
+      if(calibrating){
+        calibFrames.push(avg);
+        elDebug.textContent='Calibrating... '+calibFrames.length+'/20 dB:'+avg.toFixed(0);
+        if(calibFrames.length>=20){
+          // Noise floor = average of calibration frames + 8dB margin
+          const sum=calibFrames.reduce((a,b)=>a+b,0);
+          noiseFloor=sum/calibFrames.length+8;
+          calibrating=false;
+          elName.textContent='LISTENING';
+          elName.style.color='#444';
+          elStatus.textContent='SPEAK NOW';
+          elDebug.textContent='Noise floor: '+noiseFloor.toFixed(0)+'dB';
+        }
+        return;
+      }
+
+      // === PHASE 2: Voice gate — only process when someone is actually speaking ===
+      const isVoice=avg>noiseFloor;
+
+      if(!isVoice){
+        // No voice — clear the window so stale data doesn't linger
+        if(win.length>0)win=[];
+        changeN=0;
+        elDot.style.background='#00ff88';
+        elDot.style.animation='none';
+        const statusMsg=curSpeaker!==null?'ACTIVE — WAITING FOR VOICE':'ACTIVE — SPEAK NOW';
+        elStatus.textContent=statusMsg;
+        elDebug.textContent='dB:'+avg.toFixed(0)+' floor:'+noiseFloor.toFixed(0)+' (no voice)';
+        return;
+      }
+
+      // Voice detected!
       elDot.style.animation='breathe 1s infinite';
+      elStatus.textContent='VOICE DETECTED';
 
       const feat=extract(fft,filterbank,sr);
       win.push(feat);
       if(win.length>WIN)win.shift();
 
-      if(win.length<2)return;
+      // Need at least 4 voice frames (~200ms) before making any decisions
+      if(win.length<4){
+        elDebug.textContent='dB:'+avg.toFixed(0)+' building voice sample... '+win.length+'/4';
+        return;
+      }
 
       const curMean=vecMean(win);
 
@@ -337,11 +376,11 @@ async function startMic(){
       }
 
       const effSens=sensitivity-mobileOffset;
-      elDebug.textContent='dB:'+avg.toFixed(0)+' thr:'+effSens.toFixed(2)+' '+simText;
+      elDebug.textContent='dB:'+avg.toFixed(0)+' floor:'+noiseFloor.toFixed(0)+' thr:'+effSens.toFixed(2)+' '+simText;
 
-      // First speaker — register immediately
+      // First speaker — register from actual voice
       if(profiles.length===0){
-        profiles.push({frames:[...win],mean:curMean,frozen:false});
+        profiles.push({frames:[...win],mean:curMean,frozen:false,frameCount:win.length});
         curSpeaker=0;
         onSpeakerChange(0);
         return;
@@ -350,30 +389,30 @@ async function startMic(){
       if(bestS>=effSens){
         // Matches existing speaker
         if(bestI!==curSpeaker){
-          // Switch speaker immediately
+          // Different known speaker — switch immediately
           curSpeaker=bestI;
           onSpeakerChange(bestI);
           win=[];
         }else{
-          // Same speaker — FREEZE profile, do NOT update
-          // This is the key fix: profiles stay as first captured
-          // so they don't drift and absorb other voices
-          if(!profiles[bestI].frozen){
-            const p=profiles[bestI];
+          // Same speaker — build profile until frozen
+          const p=profiles[bestI];
+          if(!p.frozen){
             p.frames.push(feat);
-            if(p.frames.length>=PROF_MAX){
+            p.frameCount++;
+            if(p.frameCount>=PROF_FRAMES){
               p.mean=vecMean(p.frames);
-              p.frozen=true; // Lock after enough samples
+              p.frozen=true;
             }
           }
         }
         changeN=0;
       }else{
-        // Doesn't match anyone — new speaker!
+        // Doesn't match any known speaker — potential new speaker
         changeN++;
-        if(changeN>=1){
+        // Require 2 consecutive non-matching voice frames to confirm
+        if(changeN>=2){
           const ni=profiles.length;
-          profiles.push({frames:[...win],mean:curMean,frozen:false});
+          profiles.push({frames:[...win],mean:curMean,frozen:false,frameCount:win.length});
           curSpeaker=ni;
           onSpeakerChange(ni);
           changeN=0;win=[];
