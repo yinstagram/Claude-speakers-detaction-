@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Speaker Detect v2</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow-x:hidden}
+body{
+  background:#050505;color:#ccc;
+  font-family:-apple-system,BlinkMacSystemFont,'SF Mono',ui-monospace,'Courier New',monospace;
+  padding:16px;padding-top:max(16px,env(safe-area-inset-top));
+  -webkit-user-select:none;user-select:none;
+  -webkit-tap-highlight-color:transparent;
+}
+@keyframes fadeOut{from{opacity:1}to{opacity:0}}
+@keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.15);opacity:.5}}
+@keyframes slideIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes recording{0%,100%{box-shadow:0 0 0 0 rgba(255,80,80,.4)}70%{box-shadow:0 0 0 12px rgba(255,80,80,0)}}
+
+input[type=range]{-webkit-appearance:none;width:100%;height:2px;background:#222;outline:none;border-radius:1px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:#666;border:none}
+
+.flash{position:fixed;inset:0;pointer-events:none;z-index:50;animation:fadeOut .4s ease-out forwards}
+.btn{
+  cursor:pointer;border-radius:6px;font-family:inherit;
+  font-size:12px;letter-spacing:2px;text-transform:uppercase;
+  padding:14px;border:1px solid;transition:all .15s;
+  -webkit-tap-highlight-color:transparent;
+}
+.btn:active{transform:scale(.97);opacity:.8}
+.enroll-btn{
+  padding:12px 16px;border-radius:6px;font-family:inherit;
+  font-size:13px;border:1px solid #333;cursor:pointer;
+  transition:all .2s;display:flex;align-items:center;gap:10px;
+  -webkit-tap-highlight-color:transparent;width:100%;
+}
+.enroll-btn:active{transform:scale(.98)}
+</style>
+</head>
+<body>
+
+<div id="flash-el" class="flash" style="display:none"></div>
+
+<!-- Header -->
+<div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #161616;padding-bottom:10px;margin-bottom:14px">
+  <div>
+    <div style="font-size:11px;color:#555;letter-spacing:2px;font-weight:600">SPEAKER DETECT <span style="color:#333;font-weight:400">v2</span></div>
+    <div id="status-line" style="font-size:9px;color:#282828;margin-top:2px">STANDBY</div>
+  </div>
+  <div id="dot" style="width:8px;height:8px;border-radius:50%;background:#222;transition:all .3s"></div>
+</div>
+
+<!-- Phase 1: Enrollment -->
+<div id="enroll-section">
+  <div style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:8px;padding:16px;margin-bottom:14px">
+    <div style="font-size:11px;color:#666;letter-spacing:1px;margin-bottom:10px">STEP 1 — REGISTER SPEAKERS</div>
+    <div style="font-size:12px;color:#444;line-height:1.6;margin-bottom:14px">
+      Tap each speaker button and speak for 3 seconds to register their voice. Register at least 2 speakers.
+    </div>
+
+    <div id="speaker-buttons" style="display:flex;flex-direction:column;gap:8px">
+    </div>
+
+    <button id="add-speaker-btn" class="btn" onclick="addSpeakerSlot()" style="width:100%;margin-top:10px;background:#080808;border-color:#222;color:#555;font-size:11px;padding:10px">
+      + ADD SPEAKER
+    </button>
+  </div>
+
+  <button id="btn-go" class="btn" onclick="startMonitoring()" style="width:100%;background:#001100;border-color:#00ff8840;color:#00ff88;display:none">
+    ▶ START MONITORING
+  </button>
+</div>
+
+<!-- Phase 2: Monitoring -->
+<div id="monitor-section" style="display:none">
+  <!-- Main display -->
+  <div id="main-box" style="text-align:center;padding:32px 16px;margin-bottom:14px;border:1px solid #111;border-radius:8px;background:#080808;transition:all .35s">
+    <div id="speaker-letter" style="font-size:72px;font-weight:800;line-height:1;transition:all .3s"></div>
+    <div id="speaker-name" style="font-size:13px;color:#555;margin-top:8px;letter-spacing:1px"></div>
+    <div id="confidence" style="font-size:10px;color:#333;margin-top:4px"></div>
+  </div>
+
+  <!-- Energy bar -->
+  <div style="margin-bottom:14px;padding:0 2px">
+    <div style="height:3px;background:#111;border-radius:2px;overflow:hidden">
+      <div id="energy-bar" style="height:100%;border-radius:2px;width:0%;background:#222;transition:width .08s linear,background .3s"></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div style="display:flex;gap:8px;margin-bottom:14px">
+    <button class="btn" onclick="stopMonitoring()" style="flex:1;background:#110000;border-color:#ff333366;color:#ff4444">■ STOP</button>
+    <button class="btn" onclick="backToEnroll()" style="padding:14px 16px;background:#080808;border-color:#222;color:#444">↩ EDIT</button>
+  </div>
+
+  <!-- Sensitivity -->
+  <div style="margin-bottom:16px;padding:0 2px">
+    <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;margin-bottom:8px;letter-spacing:1px">
+      <span>SENSITIVITY</span><span id="sens-val">70%</span>
+    </div>
+    <input type="range" id="sens-slider" min="50" max="92" value="70" oninput="sensitivity=this.value/100;document.getElementById('sens-val').textContent=this.value+'%'">
+    <div style="display:flex;justify-content:space-between;font-size:8px;color:#222;margin-top:6px">
+      <span>MORE SWITCHES</span><span>FEWER SWITCHES</span>
+    </div>
+  </div>
+
+  <!-- Speaker chips -->
+  <div id="chips" style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap"></div>
+
+  <!-- Timeline -->
+  <div id="log-section" style="border-top:1px solid #111;padding-top:12px;display:none">
+    <div style="font-size:9px;color:#333;letter-spacing:2px;margin-bottom:8px">
+      CHANGE LOG · <span id="log-count">0</span>
+    </div>
+    <div id="log-wrap" style="max-height:200px;overflow-y:auto;-webkit-overflow-scrolling:touch"></div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div style="margin-top:20px;padding:10px;background:#080808;border:1px solid #111;border-radius:4px;font-size:9px;color:#222;line-height:1.8;text-align:center">
+  100% LOCAL · NO DATA SENT · WEB AUDIO API<br>MEL-FREQUENCY + PITCH EMBEDDINGS
+</div>
+
+<script>
+// ─── Config ───
+const COLORS=["#FF6B35","#4ECDC4","#FFE66D","#A78BFA","#F38181","#34D399","#FCBAD3","#60A5FA"];
+const FFT_SIZE=2048, NUM_BANDS=26, ENROLL_MS=3000, ANALYSIS_MS=60;
+const CONFIRM_FRAMES=3;
+
+// ─── State ───
+let speakers=[]; // {name, label, profiles:[[features]], mean:[]}
+let audioCtx, analyser, stream, filterbank, timer;
+let sensitivity=0.70, curSpeaker=-1, changeCount=0, silenceCount=0;
+let enrolling=false, enrollIdx=-1, enrollTimer=null;
+let monitorWindow=[];
+let beepCtx;
+let slotCount=0;
+
+// ─── Audio helpers ───
+const hz2mel=f=>2595*Math.log10(1+f/700);
+const mel2hz=m=>700*(10**(m/2595)-1);
+
+function buildFB(sz,sr,n){
+  const bins=sz/2, mL=hz2mel(60), mH=hz2mel(Math.min(8000,sr/2));
+  const pts=Array.from({length:n+2},(_,i)=>Math.round(mel2hz(mL+(mH-mL)*i/(n+1))*sz/sr));
+  return Array.from({length:n},(_,i)=>{
+    const f=new Float32Array(bins);
+    for(let j=pts[i];j<pts[i+1]&&j<bins;j++) f[j]=(j-pts[i])/(pts[i+1]-pts[i]);
+    for(let j=pts[i+1];j<pts[i+2]&&j<bins;j++) f[j]=(pts[i+2]-j)/(pts[i+2]-pts[i+1]);
+    return f;
+  });
+}
+
+function extractFeatures(fft, fb, sr){
+  // Mel bands
+  const mel=fb.map(f=>{let e=0;for(let i=0;i<f.length;i++)e+=10**(fft[i]/20)*f[i];return Math.log(Math.max(e,1e-10))});
+
+  // Spectral centroid (normalised)
+  let num=0,den=0;
+  for(let i=0;i<fft.length;i++){const m=10**(fft[i]/20);num+=(i*sr/FFT_SIZE)*m;den+=m}
+  mel.push(den>0?num/den/(sr/2):0);
+
+  // Spectral flatness (geometric mean / arithmetic mean in dB)
+  let logSum=0,linSum=0,cnt=0;
+  for(let i=2;i<fft.length&&i<500;i++){
+    const lin=10**(fft[i]/20);
+    if(lin>1e-10){logSum+=Math.log(lin);linSum+=lin;cnt++}
+  }
+  const flat=cnt>0?Math.exp(logSum/cnt)/(linSum/cnt+1e-10):0;
+  mel.push(flat);
+
+  // Spectral slope
+  let sx=0,sy=0,sxy=0,sx2=0;
+  for(let i=0;i<Math.min(fft.length,400);i++){
+    const y=10**(fft[i]/20);sx+=i;sy+=y;sxy+=i*y;sx2+=i*i;
+  }
+  const n=Math.min(fft.length,400);
+  const slope=(n*sxy-sx*sy)/(n*sx2-sx*sx+1e-10);
+  mel.push(slope*1000);
+
+  // Energy bands ratio (low vs high)
+  let lo=0,hi=0;
+  const mid=Math.floor(fft.length/3);
+  for(let i=0;i<mid;i++) lo+=10**(fft[i]/10);
+  for(let i=mid;i<fft.length;i++) hi+=10**(fft[i]/10);
+  mel.push(lo>0?Math.log(hi/(lo+1e-10)):0);
+
+  return mel;
+}
+
+function vecMean(vecs){
+  if(!vecs.length)return null;
+  const m=new Array(vecs[0].length).fill(0);
+  vecs.forEach(v=>v.forEach((x,i)=>m[i]+=x));
+  return m.map(x=>x/vecs.length);
+}
+
+function cosSim(a,b){
+  let d=0,na=0,nb=0;
+  for(let i=0;i<a.length;i++){d+=a[i]*b[i];na+=a[i]**2;nb+=b[i]**2}
+  return d/(Math.sqrt(na)*Math.sqrt(nb)+1e-10);
+}
+
+function getEnergy(fft){
+  let t=0,n=0;
+  for(let i=0;i<fft.length;i++){if(fft[i]>-100){t+=10**(fft[i]/10);n++}}
+  return n>0?10*Math.log10(t/n):-100;
+}
+
+// ─── Audio init ───
+async function initAudio(){
+  if(audioCtx) return;
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}
+    });
+    audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    // Resume for iOS
+    if(audioCtx.state==='suspended') await audioCtx.resume();
+    const src=audioCtx.createMediaStreamSource(stream);
+    analyser=audioCtx.createAnalyser();
+    analyser.fftSize=FFT_SIZE;
+    analyser.smoothingTimeConstant=0.2;
+    src.connect(analyser);
+    filterbank=buildFB(FFT_SIZE, audioCtx.sampleRate, NUM_BANDS);
+  }catch(e){
+    alert('Microphone error: '+e.message);
+    throw e;
+  }
+}
+
+function stopAudio(){
+  if(timer){clearInterval(timer);timer=null}
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  if(audioCtx){audioCtx.close();audioCtx=null}
+  analyser=null;
+}
+
+// ─── Beep ───
+function beep(idx){
+  try{
+    if(!beepCtx)beepCtx=new(window.AudioContext||window.webkitAudioContext)();
+    if(beepCtx.state==='suspended')beepCtx.resume();
+    const o=beepCtx.createOscillator(),g=beepCtx.createGain();
+    o.connect(g);g.connect(beepCtx.destination);
+    const f=480+idx*180;
+    o.frequency.setValueAtTime(f,beepCtx.currentTime);
+    o.frequency.setValueAtTime(f*1.3,beepCtx.currentTime+.06);
+    o.frequency.setValueAtTime(f*.9,beepCtx.currentTime+.12);
+    g.gain.setValueAtTime(.2,beepCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(.001,beepCtx.currentTime+.2);
+    o.start(beepCtx.currentTime);o.stop(beepCtx.currentTime+.2);
+  }catch(_){}
+}
+
+function flash(col){
+  const el=document.getElementById('flash-el');
+  el.style.background=col+"20";el.style.display="block";
+  el.style.animation="none";void el.offsetWidth;
+  el.style.animation="fadeOut .4s ease-out forwards";
+  setTimeout(()=>el.style.display="none",400);
+}
+
+// ─── Enrollment ───
+function addSpeakerSlot(){
+  const idx=slotCount++;
+  const letter=String.fromCharCode(65+idx);
+  const col=COLORS[idx%COLORS.length];
+
+  speakers.push({name:'Speaker '+letter, label:letter, profiles:[], mean:null});
+
+  const wrap=document.getElementById('speaker-buttons');
+  const div=document.createElement('div');
+  div.id='slot-'+idx;
+  div.innerHTML=`
+    <button class="enroll-btn" id="ebtn-${idx}" onclick="enrollSpeaker(${idx})" style="background:#0a0a0a;color:#888">
+      <div style="width:28px;height:28px;border-radius:50%;background:${col}22;border:2px solid ${col}55;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .3s" id="edot-${idx}">
+        <span style="font-size:13px;font-weight:700;color:${col}">${letter}</span>
+      </div>
+      <div style="flex:1;text-align:left">
+        <div style="font-size:12px;font-weight:600" id="ename-${idx}">Speaker ${letter}</div>
+        <div style="font-size:10px;color:#444" id="estatus-${idx}">Tap to record voice sample</div>
+      </div>
+      <div id="erec-${idx}" style="width:10px;height:10px;border-radius:50%;background:#333;flex-shrink:0"></div>
+    </button>
+    <div id="eprog-${idx}" style="height:2px;background:#111;border-radius:1px;overflow:hidden;margin-top:4px">
+      <div id="ebar-${idx}" style="height:100%;width:0%;background:${col};transition:width .1s linear"></div>
+    </div>
+  `;
+  wrap.appendChild(div);
+  updateGoButton();
+}
+
+async function enrollSpeaker(idx){
+  if(enrolling) return;
+  enrolling=true; enrollIdx=idx;
+
+  await initAudio();
+
+  const col=COLORS[idx%COLORS.length];
+  const statusEl=document.getElementById('estatus-'+idx);
+  const recEl=document.getElementById('erec-'+idx);
+  const barEl=document.getElementById('ebar-'+idx);
+  const btnEl=document.getElementById('ebtn-'+idx);
+
+  statusEl.textContent='SPEAK NOW...';
+  statusEl.style.color=col;
+  recEl.style.background='#ff4444';
+  recEl.style.animation='recording 1s infinite';
+  btnEl.style.borderColor=col+'66';
+
+  speakers[idx].profiles=[];
+  const fftBuf=new Float32Array(analyser.frequencyBinCount);
+  const sr=audioCtx.sampleRate;
+  let elapsed=0;
+  const startT=Date.now();
+
+  timer=setInterval(()=>{
+    analyser.getFloatFrequencyData(fftBuf);
+    const e=getEnergy(fftBuf);
+    if(e>-52){
+      const feat=extractFeatures(fftBuf,filterbank,sr);
+      speakers[idx].profiles.push(feat);
+    }
+    elapsed=Date.now()-startT;
+    barEl.style.width=Math.min(100,elapsed/ENROLL_MS*100)+'%';
+
+    if(elapsed>=ENROLL_MS){
+      clearInterval(timer);timer=null;
+      enrolling=false;enrollIdx=-1;
+
+      const p=speakers[idx].profiles;
+      if(p.length<15){
+        statusEl.textContent='Too quiet — tap to retry';
+        statusEl.style.color='#ff4444';
+        recEl.style.background='#ff4444';recEl.style.animation='none';
+        barEl.style.width='0%';
+        btnEl.style.borderColor='#333';
+        speakers[idx].profiles=[];
+        return;
+      }
+
+      speakers[idx].mean=vecMean(p);
+      statusEl.textContent='✓ Registered ('+p.length+' samples)';
+      statusEl.style.color='#34D399';
+      recEl.style.background='#34D399';recEl.style.animation='none';
+      barEl.style.width='100%';barEl.style.background='#34D399';
+      btnEl.style.borderColor='#34D39966';
+
+      stopAudio();
+      updateGoButton();
+    }
+  },ANALYSIS_MS);
+}
+
+function updateGoButton(){
+  const registered=speakers.filter(s=>s.mean).length;
+  const btn=document.getElementById('btn-go');
+  if(registered>=2){
+    btn.style.display='block';
+    btn.textContent='▶ START MONITORING ('+registered+' speakers)';
+  }else{
+    btn.style.display='none';
+  }
+}
+
+// ─── Monitoring ───
+async function startMonitoring(){
+  await initAudio();
+
+  document.getElementById('enroll-section').style.display='none';
+  document.getElementById('monitor-section').style.display='block';
+
+  curSpeaker=-1;changeCount=0;silenceCount=0;monitorWindow=[];
+  document.getElementById('log-wrap').innerHTML='';
+  document.getElementById('log-count').textContent='0';
+  document.getElementById('log-section').style.display='none';
+
+  // Build chips
+  const chips=document.getElementById('chips');
+  chips.innerHTML='';
+  speakers.forEach((s,i)=>{
+    if(!s.mean)return;
+    const c=COLORS[i%COLORS.length];
+    const d=document.createElement('div');
+    d.id='chip-'+i;
+    d.style.cssText=`display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:4px;
+      background:#0a0a0a;border:1px solid #181818;transition:all .3s`;
+    d.innerHTML=`<div style="width:7px;height:7px;border-radius:50%;background:${c};opacity:.3" id="chipdot-${i}"></div>
+      <span style="font-size:10px;color:#444" id="chipname-${i}">${s.label}</span>`;
+    chips.appendChild(d);
+  });
+
+  const fftBuf=new Float32Array(analyser.frequencyBinCount);
+  const sr=audioCtx.sampleRate;
+  const statusEl=document.getElementById('status-line');
+  const dotEl=document.getElementById('dot');
+  const eBar=document.getElementById('energy-bar');
+  let logData=[];
+
+  timer=setInterval(()=>{
+    analyser.getFloatFrequencyData(fftBuf);
+    const energy=getEnergy(fftBuf);
+    const pct=Math.max(0,Math.min(100,(energy+75)*1.8));
+    eBar.style.width=pct+'%';
+
+    if(energy<-48){
+      silenceCount++;
+      if(silenceCount>8){
+        statusEl.textContent='○ LISTENING';
+        dotEl.style.background='#ffaa00';dotEl.style.boxShadow='none';
+        eBar.style.background='#222';
+      }
+      return;
+    }
+    silenceCount=0;
+    statusEl.textContent='● VOICE ACTIVE';
+    dotEl.style.background='#00ff88';
+    dotEl.style.boxShadow='0 0 10px #00ff8866';
+
+    const feat=extractFeatures(fftBuf,filterbank,sr);
+    monitorWindow.push(feat);
+    if(monitorWindow.length>15) monitorWindow.shift();
+    if(monitorWindow.length<4) return;
+
+    const curMean=vecMean(monitorWindow);
+
+    // Compare to all enrolled speakers
+    let bestI=-1,bestSim=-1;
+    for(let i=0;i<speakers.length;i++){
+      if(!speakers[i].mean) continue;
+      const sim=cosSim(curMean,speakers[i].mean);
+      if(sim>bestSim){bestSim=sim;bestI=i}
+    }
+
+    const col=COLORS[bestI%COLORS.length];
+    eBar.style.background=col;
+
+    const confEl=document.getElementById('confidence');
+    confEl.textContent='Match: '+Math.round(bestSim*100)+'%';
+    confEl.style.color=bestSim>=sensitivity?'#34D399':'#ff4444';
+
+    if(bestSim>=sensitivity && bestI!==curSpeaker){
+      changeCount++;
+      if(changeCount>=CONFIRM_FRAMES){
+        curSpeaker=bestI;
+        changeCount=0;
+        monitorWindow=[];
+
+        // Update UI
+        const s=speakers[bestI];
+        const letterEl=document.getElementById('speaker-letter');
+        const nameEl=document.getElementById('speaker-name');
+        const mainBox=document.getElementById('main-box');
+
+        letterEl.textContent=s.label;
+        letterEl.style.color=col;
+        letterEl.style.textShadow='0 0 50px '+col+'30';
+        nameEl.textContent=s.name;
+        nameEl.style.color=col+'aa';
+        mainBox.style.borderColor=col+'30';
+        mainBox.style.background=col+'08';
+
+        // Update chips
+        speakers.forEach((_,j)=>{
+          const cd=document.getElementById('chipdot-'+j);
+          const cn=document.getElementById('chipname-'+j);
+          const cp=document.getElementById('chip-'+j);
+          if(!cd)return;
+          cd.style.opacity=j===bestI?'1':'.3';
+          cn.style.color=j===bestI?COLORS[j%COLORS.length]:'#444';
+          cp.style.borderColor=j===bestI?COLORS[j%COLORS.length]+'40':'#181818';
+          cp.style.background=j===bestI?COLORS[j%COLORS.length]+'10':'#0a0a0a';
+        });
+
+        // Log
+        const t=new Date();
+        logData.push({s:bestI,t});
+        document.getElementById('log-section').style.display='block';
+        document.getElementById('log-count').textContent=logData.length;
+        const row=document.createElement('div');
+        row.style.cssText='display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid #0d0d0d;animation:slideIn .3s ease';
+        const ts=t.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+        row.innerHTML=`<span style="font-size:9px;color:#282828;font-variant-numeric:tabular-nums;min-width:55px">${ts}</span>
+          <div style="width:5px;height:5px;border-radius:50%;background:${col};flex-shrink:0"></div>
+          <span style="font-size:10px;color:${col}">${s.name}</span>`;
+        const wrap=document.getElementById('log-wrap');
+        wrap.insertBefore(row,wrap.firstChild);
+        const rows=wrap.children;
+        for(let i=0;i<rows.length;i++) rows[i].style.opacity=Math.max(.3,1-i*.1);
+
+        beep(bestI);
+        flash(col);
+      }
+    }else if(bestI===curSpeaker){
+      changeCount=0;
+    }
+  },ANALYSIS_MS);
+}
+
+function stopMonitoring(){
+  stopAudio();
+  document.getElementById('status-line').textContent='STANDBY';
+  document.getElementById('dot').style.background='#222';
+  document.getElementById('dot').style.boxShadow='none';
+}
+
+function backToEnroll(){
+  stopMonitoring();
+  document.getElementById('monitor-section').style.display='none';
+  document.getElementById('enroll-section').style.display='block';
+}
+
+// ─── Init ───
+addSpeakerSlot();
+addSpeakerSlot();
+</script>
+</body>
+</html>
