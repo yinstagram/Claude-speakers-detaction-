@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/black">
+
+    <!-- Energy bar -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="4dp"
+        android:background="#111111">
+        <View
+            android:id="@+id/energyBar"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:background="@color/text_dim" />
+    </FrameLayout>
+
+    <!-- Main speaker display -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:id="@+id/speakerBox">
+
+        <TextView
+            android:id="@+id/versionTag"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:padding="16dp"
+            android:text="v3.0 NATIVE"
+            android:textColor="@color/text_muted"
+            android:textSize="11sp"
+            android:letterSpacing="0.1" />
+
+        <TextView
+            android:id="@+id/modelBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:padding="16dp"
+            android:text="ONNX · NNAPI"
+            android:textColor="@color/text_muted"
+            android:textSize="8sp"
+            android:letterSpacing="0.1" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <TextView
+                android:id="@+id/speakerLetter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="?"
+                android:textColor="@color/text_dim"
+                android:textSize="180sp"
+                android:textStyle="bold"
+                android:fontFamily="sans-serif-black" />
+
+            <TextView
+                android:id="@+id/speakerName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="LOADING MODEL..."
+                android:textColor="@color/text_dim"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.3"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="DOWNLOADING AI ENGINE"
+                android:textColor="@color/text_muted"
+                android:textSize="12sp"
+                android:letterSpacing="0.15"
+                android:layout_marginTop="16dp" />
+
+            <TextView
+                android:id="@+id/debugText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="#28282828"
+                android:textSize="10sp"
+                android:letterSpacing="0.1"
+                android:layout_marginTop="12dp" />
+        </LinearLayout>
+
+        <!-- Flash overlay -->
+        <View
+            android:id="@+id/flashOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#FFFFFF"
+            android:alpha="0"
+            android:elevation="10dp" />
+    </FrameLayout>
+
+    <!-- Speaker chips -->
+    <LinearLayout
+        android:id="@+id/chipsBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:padding="12dp"
+        android:background="@color/card_bg" />
+
+    <!-- Controls -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnStart"
+            android:layout_width="0dp"
+            android:layout_height="60dp"
+            android:layout_weight="1"
+            android:text="LOADING..."
+            android:enabled="false"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.2"
+            android:textColor="@color/green_accent"
+            android:backgroundTint="#003300"
+            android:stateListAnimator="@null" />
+
+        <Button
+            android:id="@+id/btnReset"
+            android:layout_width="wrap_content"
+            android:layout_height="60dp"
+            android:text="RESET"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.2"
+            android:textColor="@color/text_dim"
+            android:backgroundTint="@color/card_bg"
+            android:stateListAnimator="@null" />
+    </LinearLayout>
+</LinearLayout>
