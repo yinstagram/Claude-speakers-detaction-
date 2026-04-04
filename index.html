@@ -102,12 +102,11 @@ body{
 <script>
 const COLORS=["#FF6B35","#4ECDC4","#FFE66D","#A78BFA","#F38181","#34D399","#FCBAD3","#60A5FA"];
 const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=50,WIN=6;
-// Ultra-fast detection: minimal confirmations
-const CONFIRM_CHG=1,CONFIRM_NEW=2,PROF_MAX=30;
+const CONFIRM_CHG=1,CONFIRM_NEW=1,PROF_MAX=20;
 
 let running=false,audioCtx,analyser,stream,timer;
-let filterbank,profiles=[],win=[],curSpeaker=null,silenceN=0,changeN=0,beepCtx;
-let sensitivity=0.52,mobileOffset=0;
+let filterbank,profiles=[],win=[],curSpeaker=null,changeN=0,beepCtx;
+let sensitivity=0.42,mobileOffset=0;
 let wakeLock=null;
 
 // DOM refs
@@ -245,12 +244,12 @@ async function startMic(){
     const trk=stream.getAudioTracks()[0];
     const settings=trk.getSettings?trk.getSettings():{};
     if(settings.echoCancellation||settings.noiseSuppression||settings.autoGainControl){
-      mobileOffset=0.10;
+      mobileOffset=0.12;
     }else{
       mobileOffset=0;
     }
 
-    profiles=[];win=[];curSpeaker=null;silenceN=0;changeN=0;
+    profiles=[];win=[];curSpeaker=null;changeN=0;
     elChips.innerHTML='';
 
     running=true;
@@ -273,35 +272,28 @@ async function startMic(){
       let tot=0,n=0;
       for(let i=0;i<fft.length;i++){if(fft[i]>-100){tot+=10**(fft[i]/10);n++}}
       const avg=n>0?10*Math.log10(tot/n):-100;
-      const pct=Math.max(0,Math.min(100,(avg+75)*1.8));
-      const thr=-60+(1-sensitivity)*12;
-      const isSpeaking=avg>=thr;
+      const pct=Math.max(0,Math.min(100,(avg+80)*2));
 
       elEnergyBar.style.width=pct+'%';
-      elDebug.textContent='dB:'+avg.toFixed(0)+' thr:'+thr.toFixed(0)+' spk:'+(isSpeaking?'YES':'no')+' win:'+win.length+' profiles:'+profiles.length;
 
-      if(!isSpeaking){
-        silenceN++;
-        if(silenceN>5){
-          elStatus.textContent=curSpeaker!==null?'PAUSED':'WAITING...';
-          elDot.style.background='#ffaa00';
-          elDot.style.animation='none';
-          if(curSpeaker===null)elEnergyBar.style.background='#333';
-        }
-        return;
-      }
-      silenceN=0;
-      elStatus.textContent='VOICE ACTIVE';
+      // Always keep active — no auto pause. Always process audio.
+      elStatus.textContent='ACTIVE';
       elDot.style.background='#00ff88';
       elDot.style.animation='breathe 1s infinite';
 
+      // Extract features from every frame (even quiet ones carry voice info)
       const feat=extract(fft,filterbank,sr);
       win.push(feat);
       if(win.length>WIN)win.shift();
-      if(win.length<2){elStatus.textContent='ANALYZING...';return}
+
+      // Show debug
+      elDebug.textContent='dB:'+avg.toFixed(0)+' win:'+win.length+' profiles:'+profiles.length+(profiles.length>0?' sim:'+(function(){const m=vecMean(win);let b=-1;for(let i=0;i<profiles.length;i++){const s=cosSim(m,profiles[i].mean);if(s>b)b=s}return b.toFixed(3)}()):'');
+
+      if(win.length<2)return;
 
       const curMean=vecMean(win);
 
+      // First speaker — register immediately
       if(profiles.length===0){
         profiles.push({frames:[...win],mean:curMean});
         curSpeaker=0;setSpeakerUI(0);updateChips(1,0);
@@ -314,23 +306,24 @@ async function startMic(){
         if(s>bestS){bestS=s;bestI=i}
       }
 
+      // Very low threshold — any voice change triggers new speaker
       const effSens=sensitivity-mobileOffset;
       if(bestS>=effSens){
+        // Matches existing speaker
         if(bestI!==curSpeaker){
-          changeN++;
-          if(changeN>=CONFIRM_CHG){
-            curSpeaker=bestI;setSpeakerUI(bestI);updateChips(profiles.length,bestI);
-            beep(bestI);doubleFlash();
-            changeN=0;win=[];
-          }
+          // Different speaker detected — switch immediately
+          curSpeaker=bestI;setSpeakerUI(bestI);updateChips(profiles.length,bestI);
+          beep(bestI);doubleFlash();
+          win=[];
         }else{
-          changeN=0;
+          // Same speaker — update profile (keep it small so it doesn't absorb other voices)
           const p=profiles[bestI];
-          p.frames.push(...win.slice(-2));
+          p.frames.push(feat);
           if(p.frames.length>PROF_MAX)p.frames=p.frames.slice(-PROF_MAX);
           p.mean=vecMean(p.frames);
         }
-      }else if(bestS<effSens-.10){
+      }else{
+        // Doesn't match anyone — new speaker!
         changeN++;
         if(changeN>=CONFIRM_NEW){
           const ni=profiles.length;
@@ -371,7 +364,7 @@ function stopMic(){
 function toggle(){running?stopMic():startMic()}
 
 function resetAll(){
-  profiles=[];win=[];curSpeaker=null;silenceN=0;changeN=0;
+  profiles=[];win=[];curSpeaker=null;changeN=0;
   elLetter.textContent='?';elLetter.style.color='#333';
   elName.textContent='TAP START';elName.style.color='#444';
   elStatus.textContent='READY';
