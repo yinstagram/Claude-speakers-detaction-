@@ -19,7 +19,6 @@ body{
 }
 @keyframes fadeOut{from{opacity:1}to{opacity:0}}
 @keyframes breathe{0%,100%{opacity:.6}50%{opacity:1}}
-
 .flash-overlay{position:fixed;inset:0;pointer-events:none;z-index:100;background:#fff}
 
 #speaker-box{
@@ -65,145 +64,191 @@ body{
 #energy-bar-wrap{height:4px;background:#111;flex-shrink:0}
 #energy-bar{height:100%;width:0%;transition:width .08s linear,background .3s;background:#333}
 
-#version-tag{
-  position:absolute;top:16px;right:16px;font-size:11px;color:#333;letter-spacing:1px;
-}
-#listening-dot{
-  width:14px;height:14px;border-radius:50%;background:#333;
-  position:absolute;top:18px;left:18px;transition:background .3s;
-}
+#version-tag{position:absolute;top:16px;right:16px;font-size:11px;color:#333;letter-spacing:1px}
+#listening-dot{width:14px;height:14px;border-radius:50%;background:#333;position:absolute;top:18px;left:18px;transition:background .3s}
+#gpu-badge{position:absolute;top:36px;left:18px;font-size:8px;color:#333;letter-spacing:1px}
 </style>
 </head>
 <body>
 
-<!-- Energy bar at top -->
 <div id="energy-bar-wrap"><div id="energy-bar"></div></div>
 
-<!-- Main speaker display -->
 <div id="speaker-box">
   <div id="listening-dot"></div>
+  <div id="gpu-badge">GPU</div>
   <div id="version-tag">v3.0</div>
   <div id="speaker-letter">?</div>
-  <div id="speaker-name">TAP START</div>
-  <div id="status-text">READY</div>
+  <div id="speaker-name">LOADING TF.js...</div>
+  <div id="status-text">INITIALIZING GPU ENGINE</div>
   <div id="debug-info" style="font-size:min(3vw,13px);margin-top:16px;opacity:.25;letter-spacing:1px"></div>
 </div>
 
-<!-- Speaker chips -->
 <div id="chips-bar"></div>
 
-<!-- Controls -->
 <div id="controls">
-  <button id="btn-start" onclick="toggle()">START</button>
+  <button id="btn-start" onclick="toggle()" disabled>START</button>
   <button id="btn-reset" onclick="resetAll()">RESET</button>
 </div>
 
+<!-- TensorFlow.js — GPU-accelerated tensor operations -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+
 <script>
 const COLORS=["#FF6B35","#4ECDC4","#FFE66D","#A78BFA","#F38181","#34D399","#FCBAD3","#60A5FA"];
-const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=50,WIN=8;
-const PROF_FRAMES=12; // Frames to collect before freezing a profile
+const FFT_SIZE=2048;
+const NUM_MEL=40;       // 40 mel bands (was 24)
+const NUM_MFCC=20;      // 20 MFCCs from DCT
+const INTERVAL=80;      // 80ms — accuracy over speed
+const WIN=10;           // 10 frames = 800ms analysis window
+const PROF_FRAMES=15;   // 15 voice frames before freezing profile
 
-let running=false,audioCtx,analyser,stream,timer;
-let filterbank,profiles=[],win=[],curSpeaker=null,changeN=0,beepCtx;
-let sensitivity=0.42,mobileOffset=0;
-let noiseFloor=-100; // Auto-calibrated in first second
-let calibrating=true,calibFrames=[];
-let wakeLock=null;
-let notifyPermission='default';
+let running=false,audioCtx,analyser,stream,timer,beepCtx;
+let melFilterbank=null; // TF.js tensor — GPU mel filterbank matrix
+let dctMatrix=null;     // TF.js tensor — GPU DCT matrix
+let profiles=[],frameBuffer=[],curSpeaker=null,changeN=0;
+let noiseFloor=-100,calibrating=true,calibFrames=[];
+let wakeLock=null,notifyPermission='default';
+let tfReady=false;
 
-// DOM refs
-const elLetter=document.getElementById('speaker-letter');
-const elName=document.getElementById('speaker-name');
-const elStatus=document.getElementById('status-text');
-const elDot=document.getElementById('listening-dot');
-const elEnergyBar=document.getElementById('energy-bar');
-const elSpeakerBox=document.getElementById('speaker-box');
-const elChips=document.getElementById('chips-bar');
-const elBtnStart=document.getElementById('btn-start');
-const elDebug=document.getElementById('debug-info');
+// DOM
+const $=id=>document.getElementById(id);
+const el={
+  letter:$('speaker-letter'),name:$('speaker-name'),status:$('status-text'),
+  dot:$('listening-dot'),eBar:$('energy-bar'),box:$('speaker-box'),
+  chips:$('chips-bar'),btnS:$('btn-start'),debug:$('debug-info'),
+  gpu:$('gpu-badge')
+};
 
-// === Browser Notifications ===
+// ==============================
+// TF.js GPU Engine
+// ==============================
+
+// Build mel filterbank as a GPU tensor (NUM_FFT_BINS x NUM_MEL)
+function buildMelFilterbankTensor(fftSize,sampleRate,numMel){
+  const nBins=fftSize/2;
+  const fMin=80,fMax=Math.min(7600,sampleRate/2);
+  const melMin=2595*Math.log10(1+fMin/700);
+  const melMax=2595*Math.log10(1+fMax/700);
+  const melPts=[];
+  for(let i=0;i<numMel+2;i++) melPts.push(700*(Math.pow(10,(melMin+(melMax-melMin)*i/(numMel+1))/2595)-1));
+  const binPts=melPts.map(f=>Math.round(f*fftSize/sampleRate));
+
+  const fb=new Float32Array(nBins*numMel);
+  for(let m=0;m<numMel;m++){
+    for(let k=binPts[m];k<binPts[m+1]&&k<nBins;k++){
+      fb[k*numMel+m]=(k-binPts[m])/(binPts[m+1]-binPts[m]+1e-10);
+    }
+    for(let k=binPts[m+1];k<binPts[m+2]&&k<nBins;k++){
+      fb[k*numMel+m]=(binPts[m+2]-k)/(binPts[m+2]-binPts[m+1]+1e-10);
+    }
+  }
+  return tf.tensor2d(fb,[nBins,numMel]);
+}
+
+// Build DCT-II matrix as a GPU tensor (NUM_MEL x NUM_MFCC)
+function buildDCTMatrix(numMel,numMfcc){
+  const dct=new Float32Array(numMel*numMfcc);
+  for(let k=0;k<numMfcc;k++){
+    for(let n=0;n<numMel;n++){
+      dct[n*numMfcc+k]=Math.cos(Math.PI*k*(2*n+1)/(2*numMel));
+    }
+  }
+  return tf.tensor2d(dct,[numMel,numMfcc]);
+}
+
+// Extract rich speaker embedding from FFT data — ALL on GPU
+// Input: Float32Array of FFT magnitudes (dB)
+// Output: Float32Array of ~120-dim speaker embedding
+function extractEmbedding(fftData){
+  return tf.tidy(()=>{
+    // 1. Convert dB FFT to linear magnitude on GPU
+    const fftTensor=tf.tensor1d(fftData);
+    const linearMag=tf.pow(10,tf.div(fftTensor,20));
+
+    // 2. Apply mel filterbank (matrix multiply on GPU)
+    const melEnergies=tf.matMul(linearMag.reshape([1,-1]),melFilterbank);
+
+    // 3. Log compression
+    const logMel=tf.log(tf.add(melEnergies,1e-10));
+
+    // 4. DCT to get MFCCs (matrix multiply on GPU)
+    const mfcc=tf.matMul(logMel,dctMatrix); // [1, NUM_MFCC]
+
+    // 5. Also keep mel energies for extra discrimination
+    // Return concatenated: MFCCs + log mel energies = 20 + 40 = 60 dims per frame
+    const combined=tf.concat([mfcc,logMel],1);
+    return combined.dataSync(); // back to CPU as Float32Array
+  });
+}
+
+// Compute speaker embedding from multiple frames — statistics on GPU
+// Takes array of per-frame features, returns aggregated embedding
+function computeSpeakerEmbedding(frames){
+  return tf.tidy(()=>{
+    const frameTensor=tf.tensor2d(frames); // [numFrames, 60]
+
+    // Mean across time
+    const mean=frameTensor.mean(0); // [60]
+
+    // Standard deviation across time (captures voice stability)
+    const variance=frameTensor.sub(mean).square().mean(0);
+    const std=variance.sqrt(); // [60]
+
+    // Concatenate: mean + std = 120-dimensional embedding
+    const embedding=tf.concat([mean,std]);
+    return embedding.dataSync();
+  });
+}
+
+// Cosine similarity on GPU
+function cosSimilarity(a,b){
+  return tf.tidy(()=>{
+    const ta=tf.tensor1d(a);
+    const tb=tf.tensor1d(b);
+    const dot=ta.mul(tb).sum();
+    const normA=ta.norm();
+    const normB=tb.norm();
+    return dot.div(normA.mul(normB).add(1e-10)).dataSync()[0];
+  });
+}
+
+// ==============================
+// Notifications & UI
+// ==============================
+
 async function requestNotifyPermission(){
   if(!('Notification' in window))return;
-  try{
-    notifyPermission=await Notification.requestPermission();
-  }catch(_){
-    // Safari older style
+  try{notifyPermission=await Notification.requestPermission()}catch(_){
     Notification.requestPermission(function(p){notifyPermission=p});
   }
 }
 
-function notifySpeakerChange(letter,idx){
-  // Browser notification
+function notifySpeakerChange(letter){
   if(notifyPermission==='granted'){
     try{
       new Notification('Speaker Changed',{
         body:'Now speaking: Speaker '+letter,
-        icon:'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>'+letter+'</text></svg>',
-        tag:'speaker-change',
-        renotify:true,
-        silent:false
+        tag:'speaker-change',renotify:true,silent:false
       });
     }catch(_){}
   }
-  // Vibrate
   try{if(navigator.vibrate)navigator.vibrate([100,80,100])}catch(_){}
 }
 
-// === Audio math ===
-const hz2mel=f=>2595*Math.log10(1+f/700);
-const mel2hz=m=>700*(10**(m/2595)-1);
-
-function buildFB(fftSz,sr,n){
-  const bins=fftSz/2,mL=hz2mel(80),mH=hz2mel(Math.min(8000,sr/2));
-  const pts=Array.from({length:n+2},(_,i)=>Math.round(mel2hz(mL+(mH-mL)*i/(n+1))*fftSz/sr));
-  return Array.from({length:n},(_,i)=>{
-    const f=new Float32Array(bins);
-    for(let j=pts[i];j<pts[i+1]&&j<bins;j++) f[j]=(j-pts[i])/(pts[i+1]-pts[i]);
-    for(let j=pts[i+1];j<pts[i+2]&&j<bins;j++) f[j]=(pts[i+2]-j)/(pts[i+2]-pts[i+1]);
-    return f;
-  });
-}
-
-function extract(fft,fb,sr){
-  const mel=fb.map(f=>{let e=0;for(let i=0;i<f.length;i++)e+=10**(fft[i]/20)*f[i];return Math.log(Math.max(e,1e-10))});
-  let num=0,den=0;
-  for(let i=0;i<fft.length;i++){const m=10**(fft[i]/20),freq=i*sr/FFT_SIZE;num+=freq*m;den+=m}
-  mel.push(den>0?num/den/(sr/2):0);
-  return mel;
-}
-
-function vecMean(vs){
-  if(!vs.length)return null;
-  const m=new Array(vs[0].length).fill(0);
-  vs.forEach(v=>v.forEach((x,i)=>m[i]+=x));
-  return m.map(x=>x/vs.length);
-}
-
-function cosSim(a,b){
-  let d=0,na=0,nb=0;
-  for(let i=0;i<a.length;i++){d+=a[i]*b[i];na+=a[i]**2;nb+=b[i]**2}
-  return d/(Math.sqrt(na)*Math.sqrt(nb)+1e-10);
-}
-
-// === Visual feedback ===
 function doubleFlash(){
-  doOneFlash();
-  setTimeout(doOneFlash,250);
+  doOneFlash();setTimeout(doOneFlash,250);
 }
 function doOneFlash(){
   const f=document.createElement('div');
-  f.className='flash-overlay';
-  document.body.appendChild(f);
-  f.style.opacity='0.7';
-  f.style.animation='fadeOut .2s ease-out forwards';
+  f.className='flash-overlay';document.body.appendChild(f);
+  f.style.opacity='0.7';f.style.animation='fadeOut .2s ease-out forwards';
   setTimeout(()=>f.remove(),250);
 }
 
 function beep(idx){
   try{
     if(!beepCtx)beepCtx=new(window.AudioContext||window.webkitAudioContext)();
-    if(beepCtx.state==="suspended")beepCtx.resume();
+    if(beepCtx.state==='suspended')beepCtx.resume();
     const o=beepCtx.createOscillator(),g=beepCtx.createGain();
     o.connect(g);g.connect(beepCtx.destination);
     const f=520+idx*200;
@@ -216,219 +261,213 @@ function beep(idx){
   }catch(_){}
 }
 
-// === UI updates ===
 function setSpeakerUI(idx){
-  const c=COLORS[idx%COLORS.length];
-  const letter=String.fromCharCode(65+idx);
-  elLetter.textContent=letter;
-  elLetter.style.color=c;
-  elName.textContent='SPEAKER '+letter;
-  elName.style.color=c;
-  elSpeakerBox.style.background=c+'08';
-  elEnergyBar.style.background=c;
+  const c=COLORS[idx%COLORS.length],letter=String.fromCharCode(65+idx);
+  el.letter.textContent=letter;el.letter.style.color=c;
+  el.name.textContent='SPEAKER '+letter;el.name.style.color=c;
+  el.box.style.background=c+'08';el.eBar.style.background=c;
 }
 
 function updateChips(total,active){
-  elChips.innerHTML='';
+  el.chips.innerHTML='';
   for(let i=0;i<total;i++){
     const d=document.createElement('div');
     d.className='chip'+(i===active?' active':'');
     const c=COLORS[i%COLORS.length];
-    d.textContent=String.fromCharCode(65+i);
-    d.style.color=c;
-    if(i===active){
-      d.style.borderColor=c;
-      d.style.background=c+'20';
-    }
-    elChips.appendChild(d);
+    d.textContent=String.fromCharCode(65+i);d.style.color=c;
+    if(i===active){d.style.borderColor=c;d.style.background=c+'20'}
+    el.chips.appendChild(d);
   }
 }
 
-// === Wake lock ===
-async function requestWake(){
-  try{if('wakeLock' in navigator){wakeLock=await navigator.wakeLock.request('screen')}}catch(_){}
-}
-function releaseWake(){if(wakeLock){wakeLock.release();wakeLock=null}}
-
-// === Speaker change handler ===
 function onSpeakerChange(idx){
   const letter=String.fromCharCode(65+idx);
-  setSpeakerUI(idx);
-  updateChips(profiles.length,idx);
-  beep(idx);
-  doubleFlash();
-  notifySpeakerChange(letter,idx);
+  setSpeakerUI(idx);updateChips(profiles.length,idx);
+  beep(idx);doubleFlash();notifySpeakerChange(letter);
 }
 
-// === Mic & detection ===
+async function requestWake(){try{if('wakeLock' in navigator){wakeLock=await navigator.wakeLock.request('screen')}}catch(_){}}
+function releaseWake(){if(wakeLock){wakeLock.release();wakeLock=null}}
+
+// ==============================
+// Init TF.js
+// ==============================
+async function initTF(){
+  await tf.ready();
+  const backend=tf.getBackend();
+  el.gpu.textContent=backend.toUpperCase();
+  el.gpu.style.color=backend==='webgl'?'#00ff88':'#ffaa00';
+  el.name.textContent='TAP START';
+  el.status.textContent=backend.toUpperCase()+' READY · 120-DIM EMBEDDINGS';
+  el.btnS.disabled=false;
+  tfReady=true;
+}
+initTF();
+
+// ==============================
+// Main Engine
+// ==============================
 async function startMic(){
+  if(!tfReady)return;
   try{
-    // Request notification permission
     await requestNotifyPermission();
 
-    // Try raw audio first, fallback to processed
     try{
       stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
     }catch(_){
       stream=await navigator.mediaDevices.getUserMedia({audio:true});
     }
     audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-    if(audioCtx.state==="suspended") await audioCtx.resume();
+    if(audioCtx.state==='suspended')await audioCtx.resume();
 
     const src=audioCtx.createMediaStreamSource(stream);
     analyser=audioCtx.createAnalyser();
-    analyser.fftSize=FFT_SIZE;analyser.smoothingTimeConstant=.15;
+    analyser.fftSize=FFT_SIZE;analyser.smoothingTimeConstant=.1;
     src.connect(analyser);
-    filterbank=buildFB(FFT_SIZE,audioCtx.sampleRate,NUM_BANDS);
 
-    // Detect forced audio processing (iOS)
-    const trk=stream.getAudioTracks()[0];
-    const settings=trk.getSettings?trk.getSettings():{};
-    if(settings.echoCancellation||settings.noiseSuppression||settings.autoGainControl){
-      mobileOffset=0.15;
-    }else{
-      mobileOffset=0;
-    }
+    // Build GPU tensors for this sample rate
+    if(melFilterbank)melFilterbank.dispose();
+    if(dctMatrix)dctMatrix.dispose();
+    melFilterbank=buildMelFilterbankTensor(FFT_SIZE,audioCtx.sampleRate,NUM_MEL);
+    dctMatrix=buildDCTMatrix(NUM_MEL,NUM_MFCC);
 
-    profiles=[];win=[];curSpeaker=null;changeN=0;
+    profiles=[];frameBuffer=[];curSpeaker=null;changeN=0;
     calibrating=true;calibFrames=[];noiseFloor=-100;
-    elChips.innerHTML='';
+    el.chips.innerHTML='';
 
-    running=true;
-    requestWake();
-    elBtnStart.textContent='STOP';
-    elBtnStart.classList.add('running');
-    elLetter.textContent='...';
-    elLetter.style.color='#333';
-    elName.textContent='CALIBRATING';
-    elName.style.color='#ffaa00';
-    elStatus.textContent='MEASURING BACKGROUND NOISE...';
-    elDot.style.background='#ffaa00';
-    elSpeakerBox.style.background='#000';
+    running=true;requestWake();
+    el.btnS.textContent='STOP';el.btnS.classList.add('running');
+    el.letter.textContent='...';el.letter.style.color='#333';
+    el.name.textContent='CALIBRATING';el.name.style.color='#ffaa00';
+    el.status.textContent='STAY QUIET — MEASURING NOISE...';
+    el.dot.style.background='#ffaa00';el.box.style.background='#000';
 
     const fft=new Float32Array(analyser.frequencyBinCount);
-    const sr=audioCtx.sampleRate;
 
     timer=setInterval(()=>{
       analyser.getFloatFrequencyData(fft);
+
+      // Compute energy
       let tot=0,n=0;
       for(let i=0;i<fft.length;i++){if(fft[i]>-100){tot+=10**(fft[i]/10);n++}}
       const avg=n>0?10*Math.log10(tot/n):-100;
       const pct=Math.max(0,Math.min(100,(avg+80)*2));
+      el.eBar.style.width=pct+'%';
 
-      elEnergyBar.style.width=pct+'%';
-
-      // === PHASE 1: Auto-calibrate noise floor (first ~1 second) ===
+      // === PHASE 1: Calibrate noise floor ===
       if(calibrating){
         calibFrames.push(avg);
-        elDebug.textContent='Calibrating... '+calibFrames.length+'/20 dB:'+avg.toFixed(0);
+        el.debug.textContent='Calibrating... '+calibFrames.length+'/20 dB:'+avg.toFixed(0);
         if(calibFrames.length>=20){
-          // Noise floor = average of calibration frames + 8dB margin
           const sum=calibFrames.reduce((a,b)=>a+b,0);
-          noiseFloor=sum/calibFrames.length+8;
+          noiseFloor=sum/calibFrames.length+10; // +10dB margin for voices
           calibrating=false;
-          elName.textContent='LISTENING';
-          elName.style.color='#444';
-          elStatus.textContent='SPEAK NOW';
-          elDebug.textContent='Noise floor: '+noiseFloor.toFixed(0)+'dB';
+          el.name.textContent='LISTENING';el.name.style.color='#444';
+          el.status.textContent='SPEAK NOW';
         }
         return;
       }
 
-      // === PHASE 2: Voice gate — only process when someone is actually speaking ===
+      // === PHASE 2: Voice gate ===
       const isVoice=avg>noiseFloor;
 
       if(!isVoice){
-        // No voice — clear the window so stale data doesn't linger
-        if(win.length>0)win=[];
+        if(frameBuffer.length>0)frameBuffer=[];
         changeN=0;
-        elDot.style.background='#00ff88';
-        elDot.style.animation='none';
-        const statusMsg=curSpeaker!==null?'ACTIVE — WAITING FOR VOICE':'ACTIVE — SPEAK NOW';
-        elStatus.textContent=statusMsg;
-        elDebug.textContent='dB:'+avg.toFixed(0)+' floor:'+noiseFloor.toFixed(0)+' (no voice)';
+        el.dot.style.background='#00ff88';el.dot.style.animation='none';
+        el.status.textContent=curSpeaker!==null?'ACTIVE — WAITING':'ACTIVE — SPEAK NOW';
+        el.debug.textContent='dB:'+avg.toFixed(0)+' floor:'+noiseFloor.toFixed(0)+' (no voice)';
         return;
       }
 
-      // Voice detected!
-      elDot.style.animation='breathe 1s infinite';
-      elStatus.textContent='VOICE DETECTED';
+      // Voice detected — extract features on GPU
+      el.dot.style.animation='breathe 1s infinite';
+      el.status.textContent='ANALYZING VOICE...';
 
-      const feat=extract(fft,filterbank,sr);
-      win.push(feat);
-      if(win.length>WIN)win.shift();
+      const frameFeatures=extractEmbedding(fft); // 60-dim per frame, computed on GPU
+      frameBuffer.push(Array.from(frameFeatures));
+      if(frameBuffer.length>WIN)frameBuffer.shift();
 
-      // Need at least 4 voice frames (~200ms) before making any decisions
-      if(win.length<4){
-        elDebug.textContent='dB:'+avg.toFixed(0)+' building voice sample... '+win.length+'/4';
+      // Need enough voice frames for reliable embedding
+      if(frameBuffer.length<5){
+        el.debug.textContent='dB:'+avg.toFixed(0)+' collecting voice... '+frameBuffer.length+'/5';
         return;
       }
 
-      const curMean=vecMean(win);
+      // Compute 120-dim speaker embedding from frame buffer (stats on GPU)
+      const embedding=computeSpeakerEmbedding(frameBuffer);
 
-      // Compute similarity to all profiles
+      // Compare against all profiles
       let bestI=-1,bestS=-1;
       let simText='';
       for(let i=0;i<profiles.length;i++){
-        const s=cosSim(curMean,profiles[i].mean);
+        const s=cosSimilarity(embedding,profiles[i].embedding);
         simText+=String.fromCharCode(65+i)+':'+s.toFixed(3)+' ';
         if(s>bestS){bestS=s;bestI=i}
       }
 
-      const effSens=sensitivity-mobileOffset;
-      elDebug.textContent='dB:'+avg.toFixed(0)+' floor:'+noiseFloor.toFixed(0)+' thr:'+effSens.toFixed(2)+' '+simText;
+      // Threshold — lower = more sensitive to voice differences
+      const threshold=0.82;
+      el.debug.textContent='dB:'+avg.toFixed(0)+' thr:'+threshold+' dim:120 '+simText;
+      el.status.textContent='VOICE DETECTED';
 
-      // First speaker — register from actual voice
+      // First speaker
       if(profiles.length===0){
-        profiles.push({frames:[...win],mean:curMean,frozen:false,frameCount:win.length});
-        curSpeaker=0;
-        onSpeakerChange(0);
+        profiles.push({
+          embedding:Array.from(embedding),
+          frames:[...frameBuffer],
+          frozen:false,
+          frameCount:frameBuffer.length
+        });
+        curSpeaker=0;onSpeakerChange(0);
         return;
       }
 
-      if(bestS>=effSens){
+      if(bestS>=threshold){
         // Matches existing speaker
         if(bestI!==curSpeaker){
-          // Different known speaker — switch immediately
-          curSpeaker=bestI;
-          onSpeakerChange(bestI);
-          win=[];
+          curSpeaker=bestI;onSpeakerChange(bestI);
+          frameBuffer=[];
         }else{
-          // Same speaker — build profile until frozen
+          // Same speaker — build up profile then freeze
           const p=profiles[bestI];
           if(!p.frozen){
-            p.frames.push(feat);
+            p.frames.push(Array.from(frameFeatures));
             p.frameCount++;
             if(p.frameCount>=PROF_FRAMES){
-              p.mean=vecMean(p.frames);
+              // Re-compute final frozen embedding from all collected frames
+              p.embedding=Array.from(computeSpeakerEmbedding(p.frames.slice(-PROF_FRAMES)));
               p.frozen=true;
+              el.debug.textContent+=' [FROZEN '+String.fromCharCode(65+bestI)+']';
             }
           }
         }
         changeN=0;
       }else{
-        // Doesn't match any known speaker — potential new speaker
+        // Doesn't match — new speaker
         changeN++;
-        // Require 2 consecutive non-matching voice frames to confirm
         if(changeN>=2){
           const ni=profiles.length;
-          profiles.push({frames:[...win],mean:curMean,frozen:false,frameCount:win.length});
-          curSpeaker=ni;
-          onSpeakerChange(ni);
-          changeN=0;win=[];
+          profiles.push({
+            embedding:Array.from(embedding),
+            frames:[...frameBuffer],
+            frozen:false,
+            frameCount:frameBuffer.length
+          });
+          curSpeaker=ni;onSpeakerChange(ni);
+          changeN=0;frameBuffer=[];
         }
       }
     },INTERVAL);
 
   }catch(e){
     if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError'){
-      elStatus.textContent='MIC DENIED';
-      elName.textContent='ALLOW MIC & RELOAD';
-      elName.style.color='#ff4444';
+      el.status.textContent='MIC DENIED';
+      el.name.textContent='ALLOW MIC & RELOAD';el.name.style.color='#ff4444';
     }else if(e.name==='NotFoundError'){
-      elStatus.textContent='NO MIC FOUND';
+      el.status.textContent='NO MIC FOUND';
     }else{
-      elStatus.textContent='ERROR: '+e.message;
+      el.status.textContent='ERROR: '+e.message;
     }
   }
 }
@@ -437,26 +476,20 @@ function stopMic(){
   if(timer)clearInterval(timer);
   if(stream)stream.getTracks().forEach(t=>t.stop());
   if(audioCtx)audioCtx.close();
-  running=false;
-  releaseWake();
-  elBtnStart.textContent='START';
-  elBtnStart.classList.remove('running');
-  elDot.style.background='#333';
-  elDot.style.animation='none';
-  elStatus.textContent='STOPPED';
+  running=false;releaseWake();
+  el.btnS.textContent='START';el.btnS.classList.remove('running');
+  el.dot.style.background='#333';el.dot.style.animation='none';
+  el.status.textContent='STOPPED';
 }
 
 function toggle(){running?stopMic():startMic()}
 
 function resetAll(){
-  profiles=[];win=[];curSpeaker=null;changeN=0;
-  elLetter.textContent='?';elLetter.style.color='#333';
-  elName.textContent='TAP START';elName.style.color='#444';
-  elStatus.textContent='READY';
-  elSpeakerBox.style.background='#000';
-  elChips.innerHTML='';
-  elEnergyBar.style.width='0%';
-  elEnergyBar.style.background='#333';
+  profiles=[];frameBuffer=[];curSpeaker=null;changeN=0;
+  el.letter.textContent='?';el.letter.style.color='#333';
+  el.name.textContent='TAP START';el.name.style.color='#444';
+  el.status.textContent='READY';el.box.style.background='#000';
+  el.chips.innerHTML='';el.eBar.style.width='0%';el.eBar.style.background='#333';
 }
 </script>
 </body>
