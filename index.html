@@ -1,131 +1,125 @@
 <!DOCTYPE html>
-
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Speaker Detect</title>
+<title>Speaker Detect v2.0</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;overflow:hidden}
+html,body{height:100%;overflow:hidden;touch-action:manipulation}
 body{
-  background:#050505;color:#ccc;
-  font-family:'SF Mono',ui-monospace,'Courier New',monospace;
-  padding:16px;padding-top:env(safe-area-inset-top,16px);
+  background:#000;color:#fff;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   display:flex;flex-direction:column;
   -webkit-user-select:none;user-select:none;
   -webkit-tap-highlight-color:transparent;
+  padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0) 0;
 }
 @keyframes fadeOut{from{opacity:1}to{opacity:0}}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-@keyframes slideIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
-@keyframes popIn{0%{transform:scale(.8);opacity:0}100%{transform:scale(1);opacity:1}}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+@keyframes breathe{0%,100%{opacity:.6}50%{opacity:1}}
 
-input[type=range]{-webkit-appearance:none;width:100%;height:2px;background:#222;outline:none;border-radius:1px}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#555;border:none}
+.flash-overlay{position:fixed;inset:0;pointer-events:none;z-index:100;background:#fff}
 
-.flash{position:fixed;inset:0;pointer-events:none;z-index:50;animation:fadeOut .4s ease-out forwards}
-.btn{
-cursor:pointer;border-radius:4px;font-family:inherit;
-font-size:12px;letter-spacing:3px;text-transform:uppercase;
-padding:14px;border:1px solid;transition:all .15s;
+#speaker-box{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  transition:background .3s;position:relative;min-height:0;
 }
-.btn:active{transform:scale(.97);opacity:.8}
+#speaker-letter{
+  font-size:min(45vw,280px);font-weight:900;line-height:1;
+  transition:color .2s;letter-spacing:-4px;
+}
+#speaker-name{
+  font-size:min(7vw,36px);font-weight:600;margin-top:12px;
+  letter-spacing:6px;text-transform:uppercase;opacity:.7;
+}
+#status-text{
+  font-size:min(4vw,18px);margin-top:20px;opacity:.4;letter-spacing:2px;
+}
 
-#log-wrap{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch}
+#chips-bar{
+  display:flex;gap:4px;padding:12px 16px;justify-content:center;flex-wrap:wrap;
+  background:#0a0a0a;flex-shrink:0;
+}
+.chip{
+  width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:800;border:2px solid #222;transition:all .2s;opacity:.3;
+}
+.chip.active{opacity:1;transform:scale(1.1)}
+
+#controls{
+  display:flex;gap:0;flex-shrink:0;border-top:1px solid #111;
+}
+#controls button{
+  flex:1;padding:22px;border:none;font-family:inherit;
+  font-size:18px;font-weight:700;letter-spacing:3px;
+  cursor:pointer;transition:all .15s;
+}
+#controls button:active{opacity:.7}
+
+#btn-start{background:#003300;color:#00ff88}
+#btn-start.running{background:#330000;color:#ff4444}
+#btn-reset{background:#0a0a0a;color:#444;border-left:1px solid #111}
+
+#energy-bar-wrap{height:4px;background:#111;flex-shrink:0}
+#energy-bar{height:100%;width:0%;transition:width .08s linear,background .3s;background:#333}
+
+#version-tag{
+  position:absolute;top:16px;right:16px;font-size:11px;color:#333;letter-spacing:1px;
+}
+#listening-dot{
+  width:14px;height:14px;border-radius:50%;background:#333;
+  position:absolute;top:18px;left:18px;transition:background .3s;
+}
 </style>
-
 </head>
 <body>
 
-<div id="flash-el" class="flash" style="display:none"></div>
+<!-- Energy bar at top -->
+<div id="energy-bar-wrap"><div id="energy-bar"></div></div>
 
-<!-- Header -->
-
-<div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #161616;padding-bottom:10px;margin-bottom:14px;flex-shrink:0">
-  <div>
-    <div style="font-size:10px;color:#444;letter-spacing:3px">SPEAKER DETECT <span style="color:#333;font-size:8px">v2.0</span></div>
-    <div id="status-line" style="font-size:9px;color:#282828;margin-top:2px">STANDBY</div>
-  </div>
-  <div id="dot" style="width:8px;height:8px;border-radius:50%;background:#222"></div>
-</div>
-
-<!-- Main display -->
-
-<div id="main-box" style="text-align:center;padding:32px 16px;margin-bottom:14px;border:1px solid #111;border-radius:6px;background:#080808;transition:all .35s;flex-shrink:0">
-  <div id="speaker-letter" style="font-size:76px;font-weight:800;line-height:1;transition:color .3s;display:none"></div>
-  <div id="speaker-label" style="font-size:10px;color:#444;margin-top:8px;letter-spacing:3px;display:none"></div>
-  <div id="placeholder" style="font-size:13px;color:#282828;padding:18px 0">TAP START</div>
-</div>
-
-<!-- Energy bar -->
-
-<div id="energy-wrap" style="margin-bottom:14px;padding:0 2px;display:none;flex-shrink:0">
-  <div style="height:2px;background:#111;border-radius:1px;overflow:hidden">
-    <div id="energy-bar" style="height:100%;border-radius:1px;width:0%;background:#222;transition:width .08s linear,background .3s"></div>
-  </div>
-</div>
-
-<!-- Buttons -->
-
-<div style="display:flex;gap:8px;margin-bottom:14px;flex-shrink:0">
-  <button id="btn-start" class="btn" style="flex:1;background:#001100;border-color:#00ff8866;color:#00ff88" onclick="toggle()">▶ START</button>
-  <button id="btn-reset" class="btn" style="padding:14px 16px;background:#080808;border-color:#222;color:#444;display:none" onclick="resetAll()">RESET</button>
-</div>
-
-<!-- Sensitivity -->
-
-<div style="margin-bottom:16px;padding:0 2px;flex-shrink:0">
-  <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;margin-bottom:8px;letter-spacing:1px">
-    <span>SENSITIVITY</span><span id="sens-val">62%</span>
-  </div>
-  <input type="range" id="sens-slider" min="35" max="85" value="62" oninput="onSens(this.value)">
-  <div style="display:flex;justify-content:space-between;font-size:8px;color:#222;margin-top:6px">
-    <span>MORE SPLITS</span><span>FEWER SPLITS</span>
-  </div>
+<!-- Main speaker display -->
+<div id="speaker-box">
+  <div id="listening-dot"></div>
+  <div id="version-tag">v2.0</div>
+  <div id="speaker-letter">?</div>
+  <div id="speaker-name">TAP START</div>
+  <div id="status-text">READY</div>
 </div>
 
 <!-- Speaker chips -->
+<div id="chips-bar"></div>
 
-<div id="chips" style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;flex-shrink:0"></div>
-
-<!-- Timeline -->
-
-<div id="log-section" style="border-top:1px solid #111;padding-top:12px;display:none;flex:1;min-height:0;display:flex;flex-direction:column">
-  <div style="font-size:9px;color:#333;letter-spacing:2px;margin-bottom:8px;flex-shrink:0">
-    CHANGE LOG · <span id="log-count">0</span>
-  </div>
-  <div id="log-wrap"></div>
-</div>
-
-<!-- Footer -->
-
-<div style="margin-top:auto;padding:10px;background:#080808;border:1px solid #111;border-radius:4px;font-size:9px;color:#222;line-height:1.8;text-align:center;flex-shrink:0;margin-top:12px">
-  v2.0 · 100% LOCAL · NO DATA SENT · WEB AUDIO API<br>MEL-FREQUENCY EMBEDDINGS · COSINE SIMILARITY
+<!-- Controls -->
+<div id="controls">
+  <button id="btn-start" onclick="toggle()">START</button>
+  <button id="btn-reset" onclick="resetAll()">RESET</button>
 </div>
 
 <script>
 const COLORS=["#FF6B35","#4ECDC4","#FFE66D","#A78BFA","#F38181","#34D399","#FCBAD3","#60A5FA"];
-const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=80,WIN=12,CONFIRM_CHG=3,CONFIRM_NEW=5,PROF_MAX=60;
+const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=60,WIN=8;
+// Faster detection: fewer confirmations needed
+const CONFIRM_CHG=2,CONFIRM_NEW=3,PROF_MAX=40;
 
 let running=false,audioCtx,analyser,stream,timer;
 let filterbank,profiles=[],win=[],curSpeaker=null,silenceN=0,changeN=0,beepCtx;
-let sensitivity=0.62,mobileOffset=0;
-let logData=[];
+let sensitivity=0.58,mobileOffset=0;
+let wakeLock=null;
 
-// DOM
-const $=id=>document.getElementById(id);
-const el={
-  flash:$('flash-el'),status:$('status-line'),dot:$('dot'),
-  main:$('main-box'),letter:$('speaker-letter'),label:$('speaker-label'),
-  ph:$('placeholder'),energyW:$('energy-wrap'),energyB:$('energy-bar'),
-  btnS:$('btn-start'),btnR:$('btn-reset'),sensV:$('sens-val'),
-  chips:$('chips'),logSec:$('log-section'),logW:$('log-wrap'),logC:$('log-count')
-};
+// DOM refs
+const elLetter=document.getElementById('speaker-letter');
+const elName=document.getElementById('speaker-name');
+const elStatus=document.getElementById('status-text');
+const elDot=document.getElementById('listening-dot');
+const elEnergyBar=document.getElementById('energy-bar');
+const elSpeakerBox=document.getElementById('speaker-box');
+const elChips=document.getElementById('chips-bar');
+const elBtnStart=document.getElementById('btn-start');
 
-// Mel scale
+// === Audio math ===
 const hz2mel=f=>2595*Math.log10(1+f/700);
 const mel2hz=m=>700*(10**(m/2595)-1);
 
@@ -161,6 +155,20 @@ function cosSim(a,b){
   return d/(Math.sqrt(na)*Math.sqrt(nb)+1e-10);
 }
 
+// === Visual feedback ===
+function doubleFlash(){
+  doOneFlash();
+  setTimeout(doOneFlash,250);
+}
+function doOneFlash(){
+  const f=document.createElement('div');
+  f.className='flash-overlay';
+  document.body.appendChild(f);
+  f.style.opacity='0.7';
+  f.style.animation='fadeOut .2s ease-out forwards';
+  setTimeout(()=>f.remove(),250);
+}
+
 function beep(idx){
   try{
     if(!beepCtx)beepCtx=new(window.AudioContext||window.webkitAudioContext)();
@@ -177,108 +185,81 @@ function beep(idx){
   }catch(_){}
 }
 
-function flash(){
-  // Double white flash so user notices speaker change
-  el.flash.style.background="rgba(255,255,255,0.55)";
-  el.flash.style.display="block";
-  el.flash.style.animation="none";
-  void el.flash.offsetWidth;
-  el.flash.style.animation="fadeOut .25s ease-out forwards";
-  setTimeout(()=>{
-    el.flash.style.animation="none";
-    void el.flash.offsetWidth;
-    el.flash.style.animation="fadeOut .25s ease-out forwards";
-  },300);
-  setTimeout(()=>el.flash.style.display="none",600);
-}
-
+// === UI updates ===
 function setSpeakerUI(idx){
   const c=COLORS[idx%COLORS.length];
-  el.letter.textContent=String.fromCharCode(65+idx);
-  el.letter.style.color=c;
-  el.letter.style.textShadow=`0 0 60px ${c}30`;
-  el.letter.style.display="block";
-  el.letter.style.animation="popIn .3s ease";
-  el.label.textContent="SPEAKER "+(idx+1);
-  el.label.style.display="block";
-  el.ph.style.display="none";
-  el.main.style.borderColor=c+"25";
-  el.main.style.background=c+"06";
+  const letter=String.fromCharCode(65+idx);
+  elLetter.textContent=letter;
+  elLetter.style.color=c;
+  elName.textContent='SPEAKER '+letter;
+  elName.style.color=c;
+  elSpeakerBox.style.background=c+'08';
+  elEnergyBar.style.background=c;
 }
 
 function updateChips(total,active){
-  el.chips.innerHTML="";
+  elChips.innerHTML='';
   for(let i=0;i<total;i++){
-    const d=document.createElement("div");
+    const d=document.createElement('div');
+    d.className='chip'+(i===active?' active':'');
     const c=COLORS[i%COLORS.length];
-    const isA=i===active;
-    d.style.cssText=`display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:3px;
-      background:${isA?c+"12":"#0a0a0a"};border:1px solid ${isA?c+"40":"#181818"};transition:all .3s`;
-    d.innerHTML=`<div style="width:7px;height:7px;border-radius:50%;background:${c};opacity:${isA?1:.3}"></div>
-      <span style="font-size:10px;color:${isA?c:"#444"}">${String.fromCharCode(65+i)}</span>`;
-    el.chips.appendChild(d);
+    d.textContent=String.fromCharCode(65+i);
+    d.style.color=c;
+    if(i===active){
+      d.style.borderColor=c;
+      d.style.background=c+'20';
+    }
+    elChips.appendChild(d);
   }
 }
 
-function addLog(idx){
-  const t=new Date();
-  logData.push({s:idx,t});
-  el.logSec.style.display="flex";
-  el.logC.textContent=logData.length;
-  const c=COLORS[idx%COLORS.length];
-  const row=document.createElement("div");
-  row.style.cssText=`display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid #0d0d0d;animation:slideIn .3s ease`;
-  const ts=t.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
-  row.innerHTML=`<span style="font-size:9px;color:#282828;font-variant-numeric:tabular-nums;min-width:55px">${ts}</span>
-    <div style="width:5px;height:5px;border-radius:50%;background:${c};flex-shrink:0"></div>
-    <span style="font-size:10px;color:${c}">Speaker ${String.fromCharCode(65+idx)}</span>`;
-  el.logW.insertBefore(row,el.logW.firstChild);
-  // fade older
-  const rows=el.logW.children;
-  for(let i=0;i<rows.length;i++) rows[i].style.opacity=Math.max(.3,1-i*.1);
+// === Wake lock ===
+async function requestWake(){
+  try{if('wakeLock' in navigator){wakeLock=await navigator.wakeLock.request('screen')}}catch(_){}
 }
+function releaseWake(){if(wakeLock){wakeLock.release();wakeLock=null}}
 
-function onSens(v){sensitivity=v/100;el.sensV.textContent=v+"%"}
-
+// === Mic & detection ===
 async function startMic(){
   try{
-    // Try ideal constraints first, fall back to basic audio if not supported
-    let audioConstraints={echoCancellation:false,noiseSuppression:false,autoGainControl:false};
+    // Try raw audio first, fallback to processed
     try{
-      stream=await navigator.mediaDevices.getUserMedia({audio:audioConstraints});
+      stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
     }catch(_){
-      // Fallback for devices that reject these constraints (some iOS/Android)
       stream=await navigator.mediaDevices.getUserMedia({audio:true});
     }
     audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-    // Critical: resume AudioContext on mobile (iOS/Android require user gesture)
     if(audioCtx.state==="suspended") await audioCtx.resume();
+
     const src=audioCtx.createMediaStreamSource(stream);
     analyser=audioCtx.createAnalyser();
-    analyser.fftSize=FFT_SIZE;analyser.smoothingTimeConstant=.25;
+    analyser.fftSize=FFT_SIZE;analyser.smoothingTimeConstant=.2;
     src.connect(analyser);
     filterbank=buildFB(FFT_SIZE,audioCtx.sampleRate,NUM_BANDS);
-    // Detect if device audio processing is forced (iOS) — use tighter algorithm
+
+    // Detect forced audio processing (iOS)
     const trk=stream.getAudioTracks()[0];
     const settings=trk.getSettings?trk.getSettings():{};
-    const forced=settings.echoCancellation===true||settings.noiseSuppression===true||settings.autoGainControl===true;
-    if(forced){
-      // Mobile is forcing audio processing — voices will sound more similar
-      // Use lower similarity threshold to separate speakers better
-      mobileOffset=0.06;
+    if(settings.echoCancellation||settings.noiseSuppression||settings.autoGainControl){
+      mobileOffset=0.08;
     }else{
       mobileOffset=0;
     }
-    profiles=[];win=[];curSpeaker=null;silenceN=0;changeN=0;logData=[];
-    el.logW.innerHTML="";el.logC.textContent="0";
-    el.chips.innerHTML="";
+
+    profiles=[];win=[];curSpeaker=null;silenceN=0;changeN=0;
+    elChips.innerHTML='';
 
     running=true;
     requestWake();
-    el.btnS.textContent="■ STOP";el.btnS.style.background="#110000";
-    el.btnS.style.borderColor="#ff333366";el.btnS.style.color="#ff4444";
-    el.btnR.style.display="block";el.energyW.style.display="block";
-    el.ph.textContent="WAITING FOR VOICE";
+    elBtnStart.textContent='STOP';
+    elBtnStart.classList.add('running');
+    elLetter.textContent='...';
+    elLetter.style.color='#333';
+    elName.textContent='LISTENING';
+    elName.style.color='#444';
+    elStatus.textContent='SPEAK NOW';
+    elDot.style.background='#ffaa00';
+    elSpeakerBox.style.background='#000';
 
     const fft=new Float32Array(analyser.frequencyBinCount);
     const sr=audioCtx.sampleRate;
@@ -289,45 +270,44 @@ async function startMic(){
       for(let i=0;i<fft.length;i++){if(fft[i]>-100){tot+=10**(fft[i]/10);n++}}
       const avg=n>0?10*Math.log10(tot/n):-100;
       const pct=Math.max(0,Math.min(100,(avg+75)*1.8));
-      const thr=-48+(1-sensitivity)*18;
+      const thr=-45+(1-sensitivity)*15;
       const isSpeaking=avg>=thr;
 
-      el.energyB.style.width=pct+"%";
+      elEnergyBar.style.width=pct+'%';
 
       if(!isSpeaking){
         silenceN++;
-        if(silenceN>6){
-          el.status.textContent="○ LISTENING";
-          el.dot.style.background="#ffaa00";el.dot.style.boxShadow="none";
-          el.dot.style.animation="none";
-          el.energyB.style.background="#222";
+        if(silenceN>5){
+          elStatus.textContent=curSpeaker!==null?'PAUSED':'WAITING...';
+          elDot.style.background='#ffaa00';
+          elDot.style.animation='none';
+          if(curSpeaker===null)elEnergyBar.style.background='#333';
         }
         return;
       }
       silenceN=0;
-      el.status.textContent="● VOICE ACTIVE";
-      el.dot.style.background="#00ff88";
-      el.dot.style.boxShadow="0 0 10px #00ff8866";
-      el.dot.style.animation="pulse 1.2s infinite";
-
-      const col=curSpeaker!==null?COLORS[curSpeaker%COLORS.length]:"#00ff88";
-      el.energyB.style.background=col;
+      elStatus.textContent='VOICE ACTIVE';
+      elDot.style.background='#00ff88';
+      elDot.style.animation='breathe 1s infinite';
 
       const feat=extract(fft,filterbank,sr);
       win.push(feat);
       if(win.length>WIN)win.shift();
-      if(win.length<5){el.ph.textContent="BUILDING PROFILE...";return}
+      if(win.length<3){elStatus.textContent='ANALYZING...';return}
 
       const curMean=vecMean(win);
 
       if(profiles.length===0){
         profiles.push({frames:[...win],mean:curMean});
-        curSpeaker=0;setSpeakerUI(0);updateChips(1,0);addLog(0);
+        curSpeaker=0;setSpeakerUI(0);updateChips(1,0);
         return;
       }
 
       let bestI=-1,bestS=-1;
-      for(let i=0;i<profiles.length;i++){const s=cosSim(curMean,profiles[i].mean);if(s>bestS){bestS=s;bestI=i}}
+      for(let i=0;i<profiles.length;i++){
+        const s=cosSim(curMean,profiles[i].mean);
+        if(s>bestS){bestS=s;bestI=i}
+      }
 
       const effSens=sensitivity-mobileOffset;
       if(bestS>=effSens){
@@ -335,7 +315,7 @@ async function startMic(){
           changeN++;
           if(changeN>=CONFIRM_CHG){
             curSpeaker=bestI;setSpeakerUI(bestI);updateChips(profiles.length,bestI);
-            addLog(bestI);beep(bestI);flash();
+            beep(bestI);doubleFlash();
             changeN=0;win=[];
           }
         }else{
@@ -345,13 +325,13 @@ async function startMic(){
           if(p.frames.length>PROF_MAX)p.frames=p.frames.slice(-PROF_MAX);
           p.mean=vecMean(p.frames);
         }
-      }else if(bestS<effSens-.12){
+      }else if(bestS<effSens-.10){
         changeN++;
         if(changeN>=CONFIRM_NEW){
           const ni=profiles.length;
           profiles.push({frames:[...win],mean:curMean});
           curSpeaker=ni;setSpeakerUI(ni);updateChips(ni+1,ni);
-          addLog(ni);beep(ni);flash();
+          beep(ni);doubleFlash();
           changeN=0;win=[];
         }
       }
@@ -359,11 +339,13 @@ async function startMic(){
 
   }catch(e){
     if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError'){
-      alert("Microphone access denied. Please allow microphone permission in your browser settings and reload the page.");
+      elStatus.textContent='MIC DENIED';
+      elName.textContent='ALLOW MIC & RELOAD';
+      elName.style.color='#ff4444';
     }else if(e.name==='NotFoundError'){
-      alert("No microphone found. Please check your device has a working microphone.");
+      elStatus.textContent='NO MIC FOUND';
     }else{
-      alert("Mic error: "+e.message);
+      elStatus.textContent='ERROR: '+e.message;
     }
   }
 }
@@ -374,33 +356,25 @@ function stopMic(){
   if(audioCtx)audioCtx.close();
   running=false;
   releaseWake();
-  el.btnS.textContent="▶ START";el.btnS.style.background="#001100";
-  el.btnS.style.borderColor="#00ff8866";el.btnS.style.color="#00ff88";
-  el.btnR.style.display="none";el.energyW.style.display="none";
-  el.status.textContent="STANDBY";
-  el.dot.style.background="#222";el.dot.style.boxShadow="none";el.dot.style.animation="none";
+  elBtnStart.textContent='START';
+  elBtnStart.classList.remove('running');
+  elDot.style.background='#333';
+  elDot.style.animation='none';
+  elStatus.textContent='STOPPED';
 }
 
 function toggle(){running?stopMic():startMic()}
 
-// Keep screen awake on mobile during detection
-let wakeLock=null;
-async function requestWake(){
-  try{if('wakeLock' in navigator){wakeLock=await navigator.wakeLock.request('screen')}}catch(_){}
-}
-function releaseWake(){
-  if(wakeLock){wakeLock.release();wakeLock=null}
-}
-
 function resetAll(){
-  profiles=[];win=[];curSpeaker=null;silenceN=0;changeN=0;logData=[];
-  el.letter.style.display="none";el.label.style.display="none";
-  el.ph.style.display="block";el.ph.textContent="WAITING FOR VOICE";
-  el.main.style.borderColor="#111";el.main.style.background="#080808";
-  el.chips.innerHTML="";el.logW.innerHTML="";el.logC.textContent="0";
-  el.logSec.style.display="none";
+  profiles=[];win=[];curSpeaker=null;silenceN=0;changeN=0;
+  elLetter.textContent='?';elLetter.style.color='#333';
+  elName.textContent='TAP START';elName.style.color='#444';
+  elStatus.textContent='READY';
+  elSpeakerBox.style.background='#000';
+  elChips.innerHTML='';
+  elEnergyBar.style.width='0%';
+  elEnergyBar.style.background='#333';
 }
 </script>
-
 </body>
 </html>
