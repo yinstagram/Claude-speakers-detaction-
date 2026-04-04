@@ -112,7 +112,7 @@ const FFT_SIZE=2048,NUM_BANDS=24,INTERVAL=80,WIN=12,CONFIRM_CHG=3,CONFIRM_NEW=5,
 
 let running=false,audioCtx,analyser,stream,timer;
 let filterbank,profiles=[],win=[],curSpeaker=null,silenceN=0,changeN=0,beepCtx;
-let sensitivity=0.62;
+let sensitivity=0.62,mobileOffset=0;
 let logData=[];
 
 // DOM
@@ -164,6 +164,7 @@ function cosSim(a,b){
 function beep(idx){
   try{
     if(!beepCtx)beepCtx=new(window.AudioContext||window.webkitAudioContext)();
+    if(beepCtx.state==="suspended")beepCtx.resume();
     const o=beepCtx.createOscillator(),g=beepCtx.createGain();
     o.connect(g);g.connect(beepCtx.destination);
     const f=520+idx*200;
@@ -235,18 +236,39 @@ function onSens(v){sensitivity=v/100;el.sensV.textContent=v+"%"}
 
 async function startMic(){
   try{
-    stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    // Try ideal constraints first, fall back to basic audio if not supported
+    let audioConstraints={echoCancellation:false,noiseSuppression:false,autoGainControl:false};
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({audio:audioConstraints});
+    }catch(_){
+      // Fallback for devices that reject these constraints (some iOS/Android)
+      stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    }
     audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    // Critical: resume AudioContext on mobile (iOS/Android require user gesture)
+    if(audioCtx.state==="suspended") await audioCtx.resume();
     const src=audioCtx.createMediaStreamSource(stream);
     analyser=audioCtx.createAnalyser();
     analyser.fftSize=FFT_SIZE;analyser.smoothingTimeConstant=.25;
     src.connect(analyser);
     filterbank=buildFB(FFT_SIZE,audioCtx.sampleRate,NUM_BANDS);
+    // Detect if device audio processing is forced (iOS) — use tighter algorithm
+    const trk=stream.getAudioTracks()[0];
+    const settings=trk.getSettings?trk.getSettings():{};
+    const forced=settings.echoCancellation===true||settings.noiseSuppression===true||settings.autoGainControl===true;
+    if(forced){
+      // Mobile is forcing audio processing — voices will sound more similar
+      // Use lower similarity threshold to separate speakers better
+      mobileOffset=0.06;
+    }else{
+      mobileOffset=0;
+    }
     profiles=[];win=[];curSpeaker=null;silenceN=0;changeN=0;logData=[];
     el.logW.innerHTML="";el.logC.textContent="0";
     el.chips.innerHTML="";
 
     running=true;
+    requestWake();
     el.btnS.textContent="■ STOP";el.btnS.style.background="#110000";
     el.btnS.style.borderColor="#ff333366";el.btnS.style.color="#ff4444";
     el.btnR.style.display="block";el.energyW.style.display="block";
@@ -301,7 +323,8 @@ async function startMic(){
       let bestI=-1,bestS=-1;
       for(let i=0;i<profiles.length;i++){const s=cosSim(curMean,profiles[i].mean);if(s>bestS){bestS=s;bestI=i}}
 
-      if(bestS>=sensitivity){
+      const effSens=sensitivity-mobileOffset;
+      if(bestS>=effSens){
         if(bestI!==curSpeaker){
           changeN++;
           if(changeN>=CONFIRM_CHG){
@@ -316,7 +339,7 @@ async function startMic(){
           if(p.frames.length>PROF_MAX)p.frames=p.frames.slice(-PROF_MAX);
           p.mean=vecMean(p.frames);
         }
-      }else if(bestS<sensitivity-.12){
+      }else if(bestS<effSens-.12){
         changeN++;
         if(changeN>=CONFIRM_NEW){
           const ni=profiles.length;
@@ -328,7 +351,15 @@ async function startMic(){
       }
     },INTERVAL);
 
-  }catch(e){alert("Mic error: "+e.message)}
+  }catch(e){
+    if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError'){
+      alert("Microphone access denied. Please allow microphone permission in your browser settings and reload the page.");
+    }else if(e.name==='NotFoundError'){
+      alert("No microphone found. Please check your device has a working microphone.");
+    }else{
+      alert("Mic error: "+e.message);
+    }
+  }
 }
 
 function stopMic(){
@@ -336,6 +367,7 @@ function stopMic(){
   if(stream)stream.getTracks().forEach(t=>t.stop());
   if(audioCtx)audioCtx.close();
   running=false;
+  releaseWake();
   el.btnS.textContent="▶ START";el.btnS.style.background="#001100";
   el.btnS.style.borderColor="#00ff8866";el.btnS.style.color="#00ff88";
   el.btnR.style.display="none";el.energyW.style.display="none";
@@ -344,6 +376,15 @@ function stopMic(){
 }
 
 function toggle(){running?stopMic():startMic()}
+
+// Keep screen awake on mobile during detection
+let wakeLock=null;
+async function requestWake(){
+  try{if('wakeLock' in navigator){wakeLock=await navigator.wakeLock.request('screen')}}catch(_){}
+}
+function releaseWake(){
+  if(wakeLock){wakeLock.release();wakeLock=null}
+}
 
 function resetAll(){
   profiles=[];win=[];curSpeaker=null;silenceN=0;changeN=0;logData=[];
