@@ -1,0 +1,14 @@
+# Gradle cache directories
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# Build outputs (except what's uploaded as artifacts)
+*.apk
+*.aab
+
+# IDE files
+.idea/
+*.iml
+*.iws
