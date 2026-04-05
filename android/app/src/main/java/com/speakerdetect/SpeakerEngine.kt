@@ -25,6 +25,9 @@ class SpeakerEngine(private val context: Context) {
     private val profiles = mutableListOf<SpeakerProfile>()
     var currentSpeaker: Int = -1
         private set
+    private var inputName = "feats"
+    var modelLoaded = false
+        private set
 
     data class SpeakerProfile(
         val embedding: FloatArray,
@@ -37,8 +40,9 @@ class SpeakerEngine(private val context: Context) {
             "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx"
         private const val MODEL_FILE = "wespeaker_resnet34.onnx"
         private const val EMBEDDING_DIM = 256
-        private const val SIMILARITY_THRESHOLD = 0.65f
-        private const val FREEZE_AFTER = 10 // Freeze profile after 10 updates
+        private const val SIMILARITY_THRESHOLD = 0.55f
+        private const val FREEZE_AFTER = 8
+        private const val MIN_MODEL_SIZE = 20_000_000L // 20MB minimum for valid model
     }
 
     interface Listener {
@@ -52,53 +56,106 @@ class SpeakerEngine(private val context: Context) {
     var listener: Listener? = null
 
     /**
-     * Download and load the ONNX model. Uses NNAPI for hardware acceleration.
+     * Download and load the ONNX model. Tries NNAPI first, falls back to CPU.
      */
     suspend fun loadModel() = withContext(Dispatchers.IO) {
         try {
             val modelFile = File(context.filesDir, MODEL_FILE)
 
+            // Check if existing model file is valid (not corrupt/truncated)
+            if (modelFile.exists() && modelFile.length() < MIN_MODEL_SIZE) {
+                listener?.onModelLoading("Removing corrupt model file...")
+                modelFile.delete()
+            }
+
             if (!modelFile.exists()) {
                 listener?.onModelLoading("Downloading AI model (26MB)...")
-                val connection = URL(MODEL_URL).openConnection()
-                connection.connectTimeout = 30000
-                connection.readTimeout = 60000
-                val totalSize = connection.contentLength
-                var downloaded = 0L
+                downloadModel(modelFile)
+            }
 
-                connection.getInputStream().use { input ->
-                    modelFile.outputStream().use { output ->
-                        val buffer = ByteArray(8192)
-                        var bytesRead: Int
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            output.write(buffer, 0, bytesRead)
-                            downloaded += bytesRead
-                            if (totalSize > 0) {
-                                val pct = (downloaded * 100 / totalSize).toInt()
-                                listener?.onModelLoading("Downloading: $pct%")
-                            }
+            // Verify download
+            if (!modelFile.exists() || modelFile.length() < MIN_MODEL_SIZE) {
+                modelFile.delete()
+                listener?.onModelError("Download failed — file too small (${modelFile.length()} bytes). Tap RESET and try again.")
+                return@withContext
+            }
+
+            // Try NNAPI first (hardware acceleration on Pixel Tensor)
+            var loaded = false
+            try {
+                listener?.onModelLoading("Loading model with NNAPI...")
+                val nnapiOptions = OrtSession.SessionOptions().apply {
+                    addNnapi()
+                    setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                }
+                session = env.createSession(modelFile.absolutePath, nnapiOptions)
+                loaded = true
+                listener?.onModelLoading("NNAPI loaded!")
+            } catch (e: Exception) {
+                listener?.onModelLoading("NNAPI failed, using CPU: ${e.message?.take(50)}")
+            }
+
+            // Fallback to CPU if NNAPI failed
+            if (!loaded) {
+                try {
+                    val cpuOptions = OrtSession.SessionOptions().apply {
+                        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                    }
+                    session = env.createSession(modelFile.absolutePath, cpuOptions)
+                    loaded = true
+                } catch (e: Exception) {
+                    // Model file might be corrupt — delete and report
+                    modelFile.delete()
+                    listener?.onModelError("Model load failed: ${e.message?.take(80)}. Deleted file — tap RESET to retry.")
+                    return@withContext
+                }
+            }
+
+            // Auto-detect input tensor name from model metadata
+            session?.let { sess ->
+                val inputInfo = sess.inputInfo
+                if (inputInfo.isNotEmpty()) {
+                    inputName = inputInfo.keys.first()
+                }
+            }
+
+            modelLoaded = true
+            listener?.onModelReady()
+
+        } catch (e: Exception) {
+            listener?.onModelError("Unexpected: ${e.message?.take(100)}")
+        }
+    }
+
+    private fun downloadModel(modelFile: File) {
+        val tmpFile = File(context.filesDir, "$MODEL_FILE.tmp")
+        try {
+            val connection = URL(MODEL_URL).openConnection()
+            connection.connectTimeout = 30000
+            connection.readTimeout = 120000
+            val totalSize = connection.contentLength
+
+            connection.getInputStream().use { input ->
+                tmpFile.outputStream().use { output ->
+                    val buffer = ByteArray(16384)
+                    var downloaded = 0L
+                    var bytesRead: Int
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        output.write(buffer, 0, bytesRead)
+                        downloaded += bytesRead
+                        if (totalSize > 0) {
+                            val pct = (downloaded * 100 / totalSize).toInt()
+                            listener?.onModelLoading("Downloading: $pct% (${downloaded / 1024 / 1024}MB)")
                         }
                     }
                 }
             }
 
-            listener?.onModelLoading("Loading model into NNAPI...")
-
-            // Configure ONNX Runtime with NNAPI (uses Tensor TPU on Pixel)
-            val sessionOptions = OrtSession.SessionOptions().apply {
-                try {
-                    addNnapi() // Hardware acceleration on Android (Tensor TPU, GPU, DSP)
-                } catch (e: Exception) {
-                    // Fallback to CPU if NNAPI not available
-                }
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            }
-
-            session = env.createSession(modelFile.absolutePath, sessionOptions)
-            listener?.onModelReady()
-
+            // Atomic rename — prevents corrupt partial files
+            tmpFile.renameTo(modelFile)
         } catch (e: Exception) {
-            listener?.onModelError(e.message ?: "Unknown error")
+            tmpFile.delete()
+            throw e
         }
     }
 
@@ -106,7 +163,11 @@ class SpeakerEngine(private val context: Context) {
      * Process raw 16kHz mono PCM audio and detect speaker.
      */
     suspend fun processAudio(audio: FloatArray) = withContext(Dispatchers.Default) {
-        val sess = session ?: return@withContext
+        val sess = session
+        if (sess == null) {
+            listener?.onNoSpeech("MODEL NOT LOADED")
+            return@withContext
+        }
 
         // Extract fbank features
         val features = fbankExtractor.extract(audio)
@@ -120,47 +181,67 @@ class SpeakerEngine(private val context: Context) {
         var rms = 0f
         for (s in audio) rms += s * s
         rms = sqrt(rms / audio.size)
-        if (rms < 0.005f) {
+        if (rms < 0.001f) { // Very low threshold — catches distant speech
             listener?.onNoSpeech("dB:${(20 * kotlin.math.log10(rms.coerceAtLeast(1e-10f))).toInt()} (silence)")
             return@withContext
         }
 
-        // Run ONNX model — input shape: [1, numFrames, 80]
-        val inputTensor = OnnxTensor.createTensor(
-            env,
-            arrayOf(Array(numFrames) { f ->
+        try {
+            // Run ONNX model — input shape: [1, numFrames, 80]
+            val inputData = Array(1) { Array(numFrames) { f ->
                 FloatArray(80) { b -> features[f * 80 + b] }
-            })
-        )
+            }}
+            val inputTensor = OnnxTensor.createTensor(env, inputData)
 
-        val results = sess.run(mapOf("feats" to inputTensor))
-        val outputTensor = results[0] as OnnxTensor
+            val results = sess.run(mapOf(inputName to inputTensor))
+            val outputTensor = results[0] as OnnxTensor
 
-        // Extract 256-dim embedding
-        @Suppress("UNCHECKED_CAST")
-        val rawOutput = outputTensor.value
-        val embedding: FloatArray = when (rawOutput) {
-            is Array<*> -> {
-                @Suppress("UNCHECKED_CAST")
-                val arr = rawOutput as Array<FloatArray>
-                arr[0]
+            // Extract 256-dim embedding
+            val embedding = extractEmbedding(outputTensor)
+
+            inputTensor.close()
+            results.close()
+
+            if (embedding == null || embedding.size != EMBEDDING_DIM) {
+                listener?.onNoSpeech("Bad embedding: size=${embedding?.size}")
+                return@withContext
             }
-            else -> FloatArray(EMBEDDING_DIM)
+
+            // L2 normalize the embedding
+            val norm = sqrt(embedding.sumOf { (it * it).toDouble() }.toFloat())
+            if (norm > 0) for (i in embedding.indices) embedding[i] /= norm
+
+            // Compare against profiles
+            matchSpeaker(embedding, rms)
+
+        } catch (e: Exception) {
+            listener?.onNoSpeech("ONNX error: ${e.message?.take(60)}")
         }
+    }
 
-        // L2 normalize the embedding
-        val norm = sqrt(embedding.sumOf { (it * it).toDouble() }.toFloat())
-        if (norm > 0) for (i in embedding.indices) embedding[i] /= norm
-
-        inputTensor.close()
-        results.close()
-
-        // Compare against profiles
-        matchSpeaker(embedding, rms)
+    private fun extractEmbedding(tensor: OnnxTensor): FloatArray? {
+        return try {
+            val rawOutput = tensor.value
+            when (rawOutput) {
+                is Array<*> -> {
+                    val first = rawOutput[0]
+                    when (first) {
+                        is FloatArray -> first
+                        is Array<*> -> (first as? Array<FloatArray>)?.get(0)
+                        else -> null
+                    }
+                }
+                is FloatArray -> rawOutput
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun matchSpeaker(embedding: FloatArray, rms: Float) {
-        val dbStr = "dB:${(20 * kotlin.math.log10(rms.coerceAtLeast(1e-10f))).toInt()}"
+        val db = (20 * kotlin.math.log10(rms.coerceAtLeast(1e-10f))).toInt()
+        val dbStr = "${db}dB"
 
         if (profiles.isEmpty()) {
             // First speaker
@@ -168,7 +249,7 @@ class SpeakerEngine(private val context: Context) {
                 it.embeddings.add(embedding.clone())
             })
             currentSpeaker = 0
-            listener?.onSpeakerDetected(0, true, 1f, "$dbStr profiles:1")
+            listener?.onSpeakerDetected(0, true, 1f, "$dbStr | Speaker A registered | profiles:1")
             return
         }
 
@@ -179,14 +260,15 @@ class SpeakerEngine(private val context: Context) {
 
         for (i in profiles.indices) {
             val sim = cosineSimilarity(embedding, profiles[i].embedding)
-            simTexts.add("${('A' + i)}:${"%.3f".format(sim)}")
+            simTexts.add("${('A' + i)}=${"%.2f".format(sim)}")
             if (sim > bestSim) {
                 bestSim = sim
                 bestIdx = i
             }
         }
 
-        val debug = "$dbStr thr:$SIMILARITY_THRESHOLD ${simTexts.joinToString(" ")}"
+        val simsStr = simTexts.joinToString(" ")
+        val thrStr = "thr=${"%.2f".format(SIMILARITY_THRESHOLD)}"
 
         if (bestSim >= SIMILARITY_THRESHOLD) {
             // Matches existing speaker
@@ -210,14 +292,18 @@ class SpeakerEngine(private val context: Context) {
                 }
             }
 
-            listener?.onSpeakerDetected(bestIdx, isChange, bestSim, debug)
+            val changeStr = if (isChange) ">>> CHANGED" else "same"
+            listener?.onSpeakerDetected(bestIdx, isChange, bestSim,
+                "$dbStr | $simsStr | $thrStr | $changeStr")
         } else {
             // New speaker
+            val newIdx = profiles.size
             profiles.add(SpeakerProfile(embedding.clone()).also {
                 it.embeddings.add(embedding.clone())
             })
-            currentSpeaker = profiles.size - 1
-            listener?.onSpeakerDetected(currentSpeaker, true, bestSim, "$debug NEW")
+            currentSpeaker = newIdx
+            listener?.onSpeakerDetected(newIdx, true, bestSim,
+                "$dbStr | $simsStr | $thrStr | NEW Speaker ${('A' + newIdx)}")
         }
     }
 
@@ -235,6 +321,7 @@ class SpeakerEngine(private val context: Context) {
     fun release() {
         session?.close()
         session = null
+        modelLoaded = false
     }
 
     val totalSpeakers: Int get() = profiles.size

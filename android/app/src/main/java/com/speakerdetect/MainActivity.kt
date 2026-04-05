@@ -26,8 +26,8 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
         private const val SAMPLE_RATE = 16000
         private const val CHANNEL = AudioFormat.CHANNEL_IN_MONO
         private const val ENCODING = AudioFormat.ENCODING_PCM_FLOAT
-        private const val PROCESS_INTERVAL_MS = 2500L // Analyze every 2.5 seconds
-        private const val BUFFER_SECONDS = 5 // Process 5 seconds of audio
+        private const val PROCESS_INTERVAL_MS = 1500L // Analyze every 1.5 seconds (faster!)
+        private const val BUFFER_SECONDS = 3 // Process 3 seconds of audio (more responsive)
         private const val NOTIF_CHANNEL = "speaker_change"
         private val COLORS = intArrayOf(
             0xFFFF6B35.toInt(), 0xFF4ECDC4.toInt(), 0xFFFFE66D.toInt(),
@@ -41,7 +41,7 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
     private var running = false
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
-    // Audio ring buffer (5 seconds at 16kHz)
+    // Audio ring buffer (3 seconds at 16kHz)
     private val audioBuffer = FloatArray(SAMPLE_RATE * BUFFER_SECONDS)
     private var bufferWritePos = 0
     private var bufferFilled = false
@@ -58,6 +58,7 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
     private lateinit var flashOverlay: View
 
     private var lastSpeaker = -1
+    private var analysisCount = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,6 +74,10 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
         chipsBar = findViewById(R.id.chipsBar)
         btnStart = findViewById(R.id.btnStart)
         flashOverlay = findViewById(R.id.flashOverlay)
+
+        // Make debug text more visible
+        debugText.textSize = 12f
+        debugText.setTextColor(Color.parseColor("#888888"))
 
         // Setup notification channel
         createNotificationChannel()
@@ -97,6 +102,11 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
 
     @SuppressLint("MissingPermission")
     private fun startRecording() {
+        if (!engine.modelLoaded) {
+            statusText.text = "MODEL NOT READY — PLEASE WAIT"
+            return
+        }
+
         // Check permissions
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
@@ -108,14 +118,30 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
         }
 
         val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING)
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.UNPROCESSED, // Raw audio — no processing!
-            SAMPLE_RATE, CHANNEL, ENCODING,
-            maxOf(minBufSize, SAMPLE_RATE * 2 * 4) // At least 2 seconds buffer
-        ).also {
-            if (it.state != AudioRecord.STATE_INITIALIZED) {
-                // Fallback to default source if UNPROCESSED not supported
-                audioRecord = AudioRecord(
+
+        // Try UNPROCESSED source first (raw audio on Pixel)
+        audioRecord = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.UNPROCESSED,
+                SAMPLE_RATE, CHANNEL, ENCODING,
+                maxOf(minBufSize, SAMPLE_RATE * 2 * 4)
+            ).also {
+                if (it.state != AudioRecord.STATE_INITIALIZED) {
+                    it.release()
+                    throw Exception("UNPROCESSED not supported")
+                }
+            }
+        } catch (e: Exception) {
+            // Fallback to VOICE_RECOGNITION (less processing than MIC)
+            try {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    SAMPLE_RATE, CHANNEL, ENCODING,
+                    maxOf(minBufSize, SAMPLE_RATE * 2 * 4)
+                )
+            } catch (e2: Exception) {
+                // Last resort: default MIC
+                AudioRecord(
                     MediaRecorder.AudioSource.MIC,
                     SAMPLE_RATE, CHANNEL, ENCODING,
                     maxOf(minBufSize, SAMPLE_RATE * 2 * 4)
@@ -127,6 +153,7 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
         running = true
         bufferWritePos = 0
         bufferFilled = false
+        analysisCount = 0
 
         btnStart.text = "STOP"
         btnStart.setTextColor(Color.parseColor("#FF4444"))
@@ -135,7 +162,7 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
         speakerLetter.setTextColor(Color.parseColor("#333333"))
         speakerName.text = "LISTENING"
         speakerName.setTextColor(Color.parseColor("#444444"))
-        statusText.text = "RECORDING — FIRST ANALYSIS IN 3s"
+        statusText.text = "RECORDING — FIRST ANALYSIS IN 2s"
 
         // Start audio capture thread
         scope.launch(Dispatchers.IO) {
@@ -154,8 +181,10 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
 
     private fun stopRecording() {
         running = false
-        audioRecord?.stop()
-        audioRecord?.release()
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+        } catch (_: Exception) {}
         audioRecord = null
 
         btnStart.text = "START"
@@ -201,7 +230,6 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
             if (totalSamples < SAMPLE_RATE) return // Need at least 1 second
             audio = FloatArray(totalSamples)
             if (bufferFilled) {
-                // Copy from writePos to end, then start to writePos
                 val firstPart = audioBuffer.size - bufferWritePos
                 System.arraycopy(audioBuffer, bufferWritePos, audio, 0, firstPart)
                 System.arraycopy(audioBuffer, 0, audio, firstPart, bufferWritePos)
@@ -210,6 +238,7 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
             }
         }
 
+        analysisCount++
         engine.processAudio(audio)
     }
 
@@ -218,13 +247,15 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
     override fun onModelLoading(progress: String) {
         runOnUiThread {
             statusText.text = progress
+            debugText.text = "Loading model..."
         }
     }
 
     override fun onModelReady() {
         runOnUiThread {
             speakerName.text = "TAP START"
-            statusText.text = "ONNX NNAPI · WESPEAKER · 256-DIM"
+            statusText.text = "MODEL READY — WESPEAKER 256-DIM"
+            debugText.text = "ONNX loaded • Tap START to begin detecting speakers"
             btnStart.text = "START"
             btnStart.isEnabled = true
             findViewById<TextView>(R.id.modelBadge).setTextColor(Color.parseColor("#00FF88"))
@@ -234,8 +265,11 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
     override fun onModelError(error: String) {
         runOnUiThread {
             statusText.text = "ERROR: $error"
+            debugText.text = "Model failed to load. Check internet connection and tap RESET."
             speakerName.text = "MODEL FAILED"
             speakerName.setTextColor(Color.parseColor("#FF4444"))
+            // Allow retry via reset
+            btnStart.isEnabled = false
         }
     }
 
@@ -248,18 +282,18 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
             speakerLetter.setTextColor(color)
             speakerName.text = "SPEAKER $letter"
             speakerName.setTextColor(color)
-            statusText.text = "SPEAKER $letter · ${"%.1f".format(similarity * 100)}%"
+            statusText.text = "SPEAKER $letter · ${"%.0f".format(similarity * 100)}% match · #$analysisCount"
             debugText.text = debug
-            debugText.setTextColor(Color.argb(60, Color.red(color), Color.green(color), Color.blue(color)))
 
             // Update energy bar color
             energyBar.setBackgroundColor(color)
 
             if (isChange && lastSpeaker != -1) {
                 // Speaker CHANGED — flash + vibrate + notify
+                val fromLetter = ('A' + lastSpeaker).toString()
                 doubleFlash()
                 vibrate()
-                sendNotification(letter)
+                sendNotification(fromLetter, letter)
             }
             lastSpeaker = speakerIndex
 
@@ -270,7 +304,11 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
 
     override fun onNoSpeech(debug: String) {
         runOnUiThread {
-            statusText.text = if (lastSpeaker >= 0) "ACTIVE — WAITING" else "ACTIVE — SPEAK NOW"
+            if (lastSpeaker >= 0) {
+                statusText.text = "ACTIVE — NO VOICE DETECTED · #$analysisCount"
+            } else {
+                statusText.text = "ACTIVE — SPEAK NOW · #$analysisCount"
+            }
             debugText.text = debug
         }
     }
@@ -283,8 +321,8 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
     }
 
     private fun doFlash() {
-        flashOverlay.alpha = 0.7f
-        ObjectAnimator.ofFloat(flashOverlay, "alpha", 0.7f, 0f).apply {
+        flashOverlay.alpha = 0.8f
+        ObjectAnimator.ofFloat(flashOverlay, "alpha", 0.8f, 0f).apply {
             duration = 200
             start()
         }
@@ -298,7 +336,7 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
             getSystemService(VIBRATOR_SERVICE) as Vibrator
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 100, 80, 100), -1))
+            vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 150, 100, 150), -1))
         }
     }
 
@@ -338,28 +376,36 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
-    private fun sendNotification(letter: String) {
+    private fun sendNotification(fromLetter: String, toLetter: String) {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED) return
         val notification = NotificationCompat.Builder(this, NOTIF_CHANNEL)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Speaker Changed")
-            .setContentText("Now speaking: Speaker $letter")
+            .setContentTitle("Speaker Changed: $fromLetter → $toLetter")
+            .setContentText("Speaker $toLetter is now talking")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(this).notify(1, notification)
+        NotificationManagerCompat.from(this).notify(System.currentTimeMillis().toInt(), notification)
     }
 
     private fun resetAll() {
         engine.reset()
         lastSpeaker = -1
+        analysisCount = 0
         speakerLetter.text = "?"
         speakerLetter.setTextColor(Color.parseColor("#333333"))
-        speakerName.text = "TAP START"
+        speakerName.text = if (engine.modelLoaded) "TAP START" else "LOADING..."
         speakerName.setTextColor(Color.parseColor("#444444"))
-        statusText.text = "READY"
+        statusText.text = if (engine.modelLoaded) "READY" else "RELOADING MODEL..."
+        debugText.text = ""
         chipsBar.removeAllViews()
+
+        // If model failed, try reloading
+        if (!engine.modelLoaded) {
+            btnStart.isEnabled = false
+            scope.launch { engine.loadModel() }
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, results: IntArray) {
@@ -372,7 +418,7 @@ class MainActivity : AppCompatActivity(), SpeakerEngine.Listener {
     override fun onDestroy() {
         super.onDestroy()
         running = false
-        audioRecord?.release()
+        try { audioRecord?.release() } catch (_: Exception) {}
         engine.release()
         scope.cancel()
     }
