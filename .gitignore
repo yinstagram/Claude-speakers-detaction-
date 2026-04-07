@@ -12,3 +12,10 @@ android/local.properties
 .idea/
 *.iml
 *.iws
+
+# Python
+mac/.venv/
+mac/.deps_installed
+__pycache__/
+*.pyc
+*.pyo
