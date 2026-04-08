@@ -1,5 +1,8 @@
 # Speaker Detect — Mac (M-series)
 
+> **第一次用？** 睇 [開始使用.md](開始使用.md) — 一個 step-by-step
+> 中文指引，完全唔使識 git / Terminal 都跟到。
+
 Real-time speaker detection for macOS. Notifies you visually and with a native
 notification whenever a **different person** starts speaking — built for users
 who need visual cues for speaker changes.
